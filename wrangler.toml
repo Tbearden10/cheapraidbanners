@@ -2,54 +2,45 @@ name = "cheapraidbanners"
 compatibility_date = "2025-10-25"
 main = "src/index.js"
 
-# Replace with your account id
 account_id = "5e7fb995b74586d322a72a99770b31dc"
 
-# Register only the API routes the Worker should handle (Pages will handle the rest)
-routes = ["cheapraidbanners.com/stats*", "cheapraidbanners.com/run-update*", "cheapraidbanners.com/admin/refresh*"]
-
-[triggers]
-crons = [
-  "*/5 8-21 * * *",   # every 5 minutes between 08:00 and 21:59 UTC (day)
-  "*/30 22-23 * * *", # every 30 minutes between 22:00 and 23:59 UTC (night)
-  "*/30 0-7 * * *"    # every 30 minutes between 00:00 and 07:59 UTC (night)
+routes = [
+  "cheapraidbanners.com/stats*",
+  "cheapraidbanners.com/run-update*",
+  "cheapraidbanners.com/admin/refresh*",
+  "cheapraidbanners.com/members*"
 ]
 
-# KV namespace binding - keep the id you created
+[triggers]
+# scheduled handler will run on these cron expressions; DO enforces member fetch interval
+crons = [
+  "*/5 8-21 * * *",   # every 5 minutes during day -> clears run often
+  "*/30 22-7 * * *"   # every 30 minutes overnight -> clears run less often
+]
+
 [[kv_namespaces]]
 binding = "BUNGIE_STATS"
 id = "0c93637a616346cdbc322b565f101124"
 
-# Durable Objects
 [durable_objects]
   [[durable_objects.bindings]]
   name = "GLOBAL_STATS"
   class_name = "GlobalStats"
 
-# Free-plan Durable Objects need this migration form (use a unique tag)
 [[migrations]]
 tag = "add-globalstats-20251025-01"
 
-# Top-level flag
 workers_dev = false
 
-# Non-secret runtime configuration (tweak these)
 [vars]
-# Bungie endpoints and identifiers (put real endpoints/ids here)
 BUNGIE_CLAN_ID = "5335552"
-BUNGIE_CLAN_ROSTER_ENDPOINT = "https://www.bungie.net/Platform/GroupV2/{clanId}/Members/" 
-# Example member endpoint template (adjust per Bungie API needs)
+BUNGIE_CLAN_ROSTER_ENDPOINT = "https://www.bungie.net/Platform/GroupV2/{clanId}/Members/"
 BUNGIE_MEMBER_STATS_ENDPOINT_TEMPLATE = "https://www.bungie.net/platform/Player/{membershipType}/{membershipId}/Profile/"
 
-# Fetch tuning
 BUNGIE_FETCH_CONCURRENCY = "10"
 BUNGIE_PER_REQUEST_TIMEOUT_MS = "7000"
 
-# Day/night update window (UTC) and intervals (ms)
-DAY_START_HOUR_UTC = "8"
-DAY_END_HOUR_UTC = "21"
-MIN_UPDATE_INTERVAL_DAY_MS = "300000"    # 5 minutes
-MIN_UPDATE_INTERVAL_NIGHT_MS = "1800000" # 30 minutes
-
-# Optional: a JSON path into a single endpoint response if you prefer
-# BUNGIE_JSON_PATH = "Response.data.clears"
+# Control how often the DO will actually perform the expensive members fetch.
+# Set this to a long interval (ms) to make members be fetched infrequently via cron.
+MIN_MEMBERS_UPDATE_INTERVAL_MS = "3600000"  # 1 hour
+MIN_CLEARS_UPDATE_INTERVAL_MS = "300000"    # 5 minutes
