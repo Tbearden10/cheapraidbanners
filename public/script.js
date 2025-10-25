@@ -1,8 +1,4 @@
-// public/script.js
-// Always show members. Fetch members on load (KV-backed /members).
-// Highlight roles when available (founder/admin/officer).
-// Stats polling remains (clears etc) but does NOT change member count.
-
+// client: unchanged behaviour but handle 502/errors gracefully
 (() => {
   const STATS_URL = '/stats';
   const MEMBERS_URL = '/members';
@@ -26,12 +22,13 @@
     try {
       const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
       clearTimeout(t);
-      if (!res.ok) throw new Error('bad status');
+      if (!res.ok) return null;
       return await res.json();
+    } catch (e) {
+      return null;
     } finally { clearTimeout(t); }
   }
 
-  // only update clears/prophecy/updated
   async function updateStats(){
     try {
       const data = await fetchJson(STATS_URL).catch(()=>null);
@@ -53,7 +50,6 @@
     }
   }
 
-  // normalize various payload shapes into array of member objects
   function normalizeMembersPayload(payload) {
     if (!payload) return [];
     if (Array.isArray(payload)) return payload;
@@ -62,18 +58,14 @@
     return [];
   }
 
-  // determine role from member object. backend should ideally include member.role (founder/admin/officer).
   function memberRole(member) {
-    // try common keys or heuristics
     if (!member) return null;
     const role = (member.role ?? member.rank ?? member.title ?? '').toString().toLowerCase();
     if (role.includes('founder') || role.includes('owner')) return 'founder';
     if (role.includes('admin')) return 'admin';
     if (role.includes('officer')) return 'officer';
-    // sometimes API provides flags
-    if (member.isFounder || member.is_owner || member.is_owner === true) return 'founder';
-    if (member.isAdmin || member.is_admin === true) return 'admin';
-    if (member.isOfficer || member.is_officer === true) return 'officer';
+    if (member.memberType === 3) return 'founder';
+    if (member.memberType === 2) return 'admin';
     return null;
   }
 
@@ -82,7 +74,6 @@
     return role === 'founder' ? 'role-founder' : role === 'admin' ? 'role-admin' : role === 'officer' ? 'role-officer' : '';
   }
 
-  // render members into the sidebar
   function renderMembers(members) {
     const inner = $(ids.memberListInner);
     const membersCountEl = $(ids.membersCount);
@@ -102,12 +93,10 @@
 
       const name = document.createElement('div');
       name.className = 'member-name';
-      // displayName is preferred; fallback to name/id
       name.textContent = m.displayName ?? m.name ?? m.display_name ?? m.username ?? String(m.membershipId ?? m.id ?? '');
 
       row.appendChild(name);
 
-      // role badge
       const role = memberRole(m);
       if (role) {
         const badge = document.createElement('div');
@@ -120,7 +109,6 @@
     }
   }
 
-  // fetch members once on load and render them (members always shown)
   async function loadMembersOnStart() {
     try {
       const payload = await fetchJson(MEMBERS_URL).catch(()=>null);

@@ -19,7 +19,7 @@ crons = [
 
 [[kv_namespaces]]
 binding = "BUNGIE_STATS"
-id = "0c93637a616346cdbc322b565f101124"
+id = "369e27f8c9514999aa11d1dd5aacbb19"
 
 [durable_objects]
 bindings = [
