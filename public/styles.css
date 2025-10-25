@@ -3,6 +3,7 @@
   --gap: 18px;
   --banner-w: 220px;
   --member-w: 280px;
+  --member-list-h: 420px;
   --muted: #666;
   --radius: 6px;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
@@ -11,7 +12,7 @@
 
 /* minimal reset */
 *{box-sizing:inherit;margin:0;padding:0}
-html,body{height:100%;background:#fff;color:#000}
+html,body{height:100%;background:#fff;color:#000;-webkit-font-smoothing:antialiased;}
 
 /* center the app */
 .wrap{
@@ -31,11 +32,12 @@ html,body{height:100%;background:#fff;color:#000}
   align-items:flex-start;
   padding:12px;
   box-sizing:border-box;
+  background:transparent;
 }
 
 /* banner column */
 .banner{flex:0 0 var(--banner-w)}
-.banner img{width:100%;height:auto;display:block;object-fit:contain}
+.banner img{width:100%;height:auto;display:block;object-fit:contain;border-radius:6px}
 
 /* center column: fixed readable width so it doesn't grow/shrink when members column appears */
 .center{
@@ -56,7 +58,7 @@ html,body{height:100%;background:#fff;color:#000}
 .action-btn{
   padding:0.4rem 0.75rem;
   min-width:140px;
-  border-radius:6px;
+  border-radius:var(--radius);
   border:1px solid #d0d0d0;
   background:transparent;
   color:inherit;
@@ -81,7 +83,7 @@ html,body{height:100%;background:#fff;color:#000}
 .label{color:var(--muted)}
 .value{font-weight:700}
 
-/* member list column: normal flex child; when visible it takes fixed width and doesn't change center width */
+/* member list column: fixed width, does not affect center width */
 .member-list{
   flex:0 0 var(--member-w);
   width:var(--member-w);
@@ -94,59 +96,29 @@ html,body{height:100%;background:#fff;color:#000}
 .member-list-header{margin-bottom:6px}
 .member-list-title{font-weight:700;margin-bottom:6px}
 
-/* member item and role badges */
-.member-item{
-  display:flex;
+/* member list inner: two-column grid, fixed height, scrollable */
+.member-list-inner{
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
   gap:8px;
-  align-items:center;
-  padding:6px 8px;
-  width:100%;
-  border-radius:6px;
-}
-.member-item + .member-item{margin-top:6px}
-.member-name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.role-badge{
-  font-size:0.75rem;
-  padding:2px 6px;
-  border-radius:999px;
-  border:1px solid #ccc;
-  background:#fafafa;
-  color:#111;
-  font-weight:700;
+  align-items:start;
+  height: var(--member-list-h);
+  max-height: var(--member-list-h);
+  overflow: auto;
+  padding-right:6px; /* room for scrollbar */
+  box-sizing: border-box;
 }
 
-/* role-specific styles */
-.role-founder{ background:#111; color:#fff; border-color:#111; }
-.role-admin{ background:#f0f0f0; color:#111; border-color:#d0d0d0; }
-.role-officer{ background:#fff7d6; color:#8a6d00; border-color:#f1e6b5; }
-
-/* separator and footer */
-.sep{width:100%;border:none;border-top:1px solid #000;margin:8px 0}
-.site-footer{position:fixed;left:0;right:0;bottom:0;height:44px;display:flex;align-items:center;justify-content:center;border-top:1px solid #000;background:#fff;padding:6px 10px}
-.footer-inner{font-size:0.9rem;color:var(--muted)}
-
-/* responsive: stack and put member list under card on small screens */
-@media (max-width:800px){
-  .card{flex-direction:column;align-items:center}
-  .banner{width:60%}
-  .center{min-width:0;max-width:56ch;width:100%}
-  .member-list{width:100%;flex:0 0 auto;margin-top:12px;border-left:none}
-  .role-badge{font-size:0.75rem;padding:2px 8px}
-  .action-btn{min-width:45%}
+/* responsive fallback: single column on narrow screens */
+@media (max-width: 700px) {
+  .member-list-inner{
+    grid-template-columns: 1fr;
+    height: 360px;
+    max-height: 360px;
+  }
 }
 
-/* tiny phones */
-@media (max-width:420px){
-  .stats-grid{grid-template-columns:1fr}
-  .action-btn{min-width:100%}
-}
-
-/* Minimal member list styles: emblems as background, readable overlay, role badges, online dot */
-
-.member-list{padding:8px;box-sizing:border-box}
-.member-list-inner{display:flex;flex-direction:column;gap:8px;align-items:stretch}
-
-/* each row uses emblem as background; white translucent overlay for text */
+/* individual member tile */
 .member-item{
   position:relative;
   border-radius:8px;
@@ -157,9 +129,10 @@ html,body{height:100%;background:#fff;color:#000}
   padding:8px;
   background-color:#fff;
   border:1px solid #eee;
+  box-shadow: 0 1px 0 rgba(0,0,0,0.02);
 }
 
-/* ensure readability: subtle overlay */
+/* subtle translucent overlay to ensure text readability over emblems */
 .member-item::before{
   content:"";
   position:absolute;
@@ -168,8 +141,15 @@ html,body{height:100%;background:#fff;color:#000}
   z-index:0;
 }
 
-/* content sits above overlay */
-.member-item-content{position:relative;z-index:1;display:flex;align-items:center;width:100%;gap:8px}
+/* content above overlay */
+.member-item-content{
+  position:relative;
+  z-index:1;
+  display:flex;
+  align-items:center;
+  width:100%;
+  gap:8px;
+}
 
 /* name and supplemental stacked */
 .member-name-wrap{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}
@@ -184,7 +164,7 @@ html,body{height:100%;background:#fff;color:#000}
 .online-dot.online{background:#2ecc71} /* green */
 .online-dot.offline{background:#c0c0c0}
 
-/* role badges */
+/* role badge styles */
 .role-badge{
   font-size:0.75rem;
   padding:2px 8px;
@@ -193,7 +173,36 @@ html,body{height:100%;background:#fff;color:#000}
   background:#fafafa;
   color:#111;
   font-weight:700;
+  white-space:nowrap;
 }
 .role-founder{ background:#111; color:#fff; border-color:#111; }
 .role-admin{ background:#f0f0f0; color:#111; border-color:#d0d0d0; }
 .role-officer{ background:#fff7d6; color:#8a6d00; border-color:#f1e6b5; }
+
+/* spacing for stacked items when using single-column grid */
+.member-item + .member-item{margin-top:0}
+
+/* separator and footer */
+.sep{width:100%;border:none;border-top:1px solid #000;margin:8px 0}
+.site-footer{position:fixed;left:0;right:0;bottom:0;height:44px;display:flex;align-items:center;justify-content:center;border-top:1px solid #000;background:#fff;padding:6px 10px}
+.footer-inner{font-size:0.9rem;color:var(--muted)}
+
+/* responsive: stack card and place member list under card on small screens */
+@media (max-width:800px){
+  .card{flex-direction:column;align-items:center}
+  .banner{width:60%}
+  .center{min-width:0;max-width:56ch;width:100%}
+  .member-list{width:100%;flex:0 0 auto;margin-top:12px;border-left:none;padding:12px}
+  .action-btn{min-width:45%}
+}
+
+/* tiny phones */
+@media (max-width:420px){
+  .stats-grid{grid-template-columns:1fr}
+  .action-btn{min-width:100%}
+}
+
+/* scrollbar styling for member list (subtle) */
+.member-list-inner::-webkit-scrollbar { width: 10px; height: 10px; }
+.member-list-inner::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.12); border-radius:6px; }
+.member-list-inner::-webkit-scrollbar-track { background: transparent; }

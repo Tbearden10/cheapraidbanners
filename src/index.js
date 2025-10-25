@@ -101,7 +101,6 @@ export default {
         const members = raw.map(mapBungieResultToMember);
         const fetchedAt = new Date().toISOString();
         const snapshot = {
-          memberCount: members.length,
           clears: 0, // Clears computation removed per request (only Bungie fetch for now)
           prophecyClears: 0,
           updated: fetchedAt,

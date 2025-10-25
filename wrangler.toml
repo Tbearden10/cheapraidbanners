@@ -31,7 +31,6 @@ bindings = [
 tag = "create-globalstats-20251025-v1"
 new_sqlite_classes = ["GlobalStats"]
 
-workers_dev = false
 
 [vars]
 BUNGIE_CLAN_ID = "5335552"
@@ -43,3 +42,4 @@ BUNGIE_PER_REQUEST_TIMEOUT_MS = "7000"
 
 MIN_MEMBERS_UPDATE_INTERVAL_MS = "10800000" # 3 hours for members
 MIN_CLEARS_UPDATE_INTERVAL_MS  = "300000"   # 5 minutes for clears
+
