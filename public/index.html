@@ -3,28 +3,67 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Cheap Raid Banners</title>
+  <title>cheapraidbanners.com [flag]</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <main class="center-content" role="main">
-    <div class="card" aria-live="polite">
-      <h1 class="site-title">Cheap Raid Banners</h1>
-      <p class="subtitle">Live Bungie statistic</p>
+  <main class="wrap">
+    <article class="card" id="card" aria-label="Clan overview">
+      <!-- left: banner -->
+      <div class="banner">
+        <img id="clan-banner" src="/assets/banner.png" alt="Clan banner" width="480" height="240" loading="lazy">
+      </div>
 
-      <div class="stats" role="list" aria-label="Stats">
-        <div class="stat-pill" role="listitem" aria-label="Clears">
-          <span class="stat-label">Clears</span>
-          <!-- ID expected by script.js -->
-          <span id="bungie-clears" class="stat-value">0</span>
-          <span class="stat-updated" id="bungie-updated">never</span>
+      <!-- center: site text + stats (always visible) -->
+      <div class="center">
+        <div class="heading">
+          <div class="site">cheapraidbanners.com <span class="callsign">[flag]</span></div>
+          <div class="motto">"50% off raid banners"</div>
+          <div class="about">We have the cheapest raid banners around!</div>
+        </div>
+
+        <hr class="sep">
+
+        <!-- stats: always shown -->
+        <div id="stats" class="stats" aria-live="polite" aria-hidden="false">
+          <div class="stats-grid">
+            <div class="stat">
+              <div class="label">Members</div>
+              <div id="bungie-members" class="value">—</div>
+            </div>
+            <div class="stat">
+              <div class="label">Prophecy clears</div>
+              <div id="prophecy-clears" class="value">—</div>
+            </div>
+            <div class="stat">
+              <div class="label">Total clears</div>
+              <div id="bungie-clears" class="value">—</div>
+            </div>
+          </div>
+
+          <!-- last updated small and below the grid -->
+          <div class="updated-row">
+            <div class="updated-label">Last updated</div>
+            <div id="bungie-updated" class="updated-value small">never</div>
+          </div>
         </div>
       </div>
 
-      <noscript class="muted" aria-hidden="false">JavaScript is required for live updates.</noscript>
-      <p class="muted small">Last update shown is the authoritative value stored in the backend KV.</p>
-    </div>
+      <!-- right: member list toggle (minimal) -->
+      <div class="right">
+        <button id="toggle-members" aria-expanded="false" aria-controls="member-list">▶</button>
+      </div>
+    </article>
+
+    <!-- member list area (appears to right on wide screens, below on narrow) -->
+    <aside id="member-list" class="member-list" aria-hidden="true">
+      <div id="member-list-inner"></div>
+    </aside>
   </main>
+
+  <footer class="site-footer" role="contentinfo">
+    <div class="footer-inner">made by belly</div>
+  </footer>
 
   <script src="/script.js" defer></script>
 </body>
