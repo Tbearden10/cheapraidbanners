@@ -3,14 +3,19 @@ compatibility_date = "2025-10-25"
 main = "src/index.js"
 
 account_id = "5e7fb995b74586d322a72a99770b31dc"
+zone_id = "YOUR_ZONE_ID" # replace with the Zone ID for cheapraidbanners.com (Dashboard → Overview)
 
+# route only the API endpoints to this worker; Pages will serve the site root/static files
+routes = ["cheapraidbanners.com/count*", "cheapraidbanners.com/events*"]
+
+# if you want workers.dev preview URL too, set workers_dev = true
+workers_dev = false
 
 [durable_objects]
 bindings = [
   { name = "VISITOR_COUNTER", class_name = "VisitorCounter" }
 ]
 
-# Durable Object migrations ensure Wrangler wires the DO class to the binding.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["VisitorCounter"]
