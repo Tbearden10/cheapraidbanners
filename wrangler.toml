@@ -3,23 +3,16 @@ compatibility_date = "2025-10-25"
 main = "src/index.js"
 
 account_id = "5e7fb995b74586d322a72a99770b31dc"
-# Optional: include zone_id if you want Wrangler to create the routes automatically.
-# Replace YOUR_ZONE_ID with the Zone ID from Cloudflare Dashboard → Overview.
-# If you prefer to add routes in the Dashboard, remove the zone_id and routes lines.
-# zone_id = "YOUR_ZONE_ID"
 
-# Route ONLY the API endpoints to the Worker so Pages serves the rest
-routes = ["cheapraidbanners.com/count*", "cheapraidbanners.com/events*"]
+routes = ["cheapraidbanners.com/stats*"]  
 
-# workers_dev preview disabled for production; set to true if you want workers.dev preview URLs
+[triggers]
+
+crons = ["*/1 * * * *"]
+
+# KV namespace binding: replace id with the namespace id you create (see next steps)
+[[kv_namespaces]]
+binding = "BUNGIE_STATS"
+id = "b7b45a67f08a49da9157cfcd57cda5b0"
+
 workers_dev = false
-
-[durable_objects]
-bindings = [
-  { name = "VISITOR_COUNTER", class_name = "VisitorCounter" }
-]
-
-[[migrations]]
-tag = "v1"
-# Free plan requires SQLite-backed Durable Object migration
-new_sqlite_classes = ["VisitorCounter"]
