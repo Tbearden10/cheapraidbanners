@@ -12,7 +12,6 @@ routes = [
 ]
 
 [triggers]
-# scheduled handler will run on these cron expressions; DO enforces member fetch interval
 crons = [
   "*/5 8-21 * * *",   # every 5 minutes during day -> clears run often
   "*/30 22-7 * * *"   # every 30 minutes overnight -> clears run less often
@@ -23,9 +22,9 @@ binding = "BUNGIE_STATS"
 id = "0c93637a616346cdbc322b565f101124"
 
 [durable_objects]
-  [[durable_objects.bindings]]
-  name = "GLOBAL_STATS"
-  class_name = "GlobalStats"
+bindings = [
+  { name = "GLOBAL_STATS", class_name = "GlobalStats" }
+]
 
 [[migrations]]
 tag = "add-globalstats-20251025-01"
