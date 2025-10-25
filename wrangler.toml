@@ -40,7 +40,5 @@ BUNGIE_MEMBER_STATS_ENDPOINT_TEMPLATE = "https://www.bungie.net/platform/Player/
 BUNGIE_FETCH_CONCURRENCY = "10"
 BUNGIE_PER_REQUEST_TIMEOUT_MS = "7000"
 
-# Control how often the DO will actually perform the expensive members fetch.
-# Set this to a long interval (ms) to make members be fetched infrequently via cron.
-MIN_MEMBERS_UPDATE_INTERVAL_MS = "3600000"  # 1 hour
-MIN_CLEARS_UPDATE_INTERVAL_MS = "300000"    # 5 minutes
+MIN_MEMBERS_UPDATE_INTERVAL_MS = "10800000" # 3 hours for members
+MIN_CLEARS_UPDATE_INTERVAL_MS  = "300000"   # 5 minutes for clears

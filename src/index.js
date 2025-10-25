@@ -5,17 +5,17 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // GET /stats -> return KV.latest, fallback to derive from members_list, fallback zeros
+    // GET /stats -> synthesize from clears_snapshot + members_list (memberCount always from members_list)
     if ((path === '/stats' || path === '/') && request.method === 'GET') {
       return handleGetStats(request, env);
     }
 
-    // GET /members -> return KV.members_list (shaped) or a small dummy if missing
+    // GET /members -> return KV.members_list shaped { fetchedAt, members, memberCount } (NO DO call)
     if (path === '/members' && request.method === 'GET') {
       return handleGetMembers(request, env);
     }
 
-    // Admin endpoint to trigger updates via DO: protected by x-admin-token
+    // POST /run-update -> admin-protected trigger for DO (body.action = 'members'|'clears')
     if ((path === '/run-update' || path === '/run-update-members' || path === '/run-update-clears') && (request.method === 'POST' || request.method === 'GET')) {
       return handleRunUpdate(request, env);
     }
@@ -23,69 +23,82 @@ export default {
     return new Response('Not found', { status: 404 });
   },
 
-  // scheduled handler triggers DO update-clears and update-members (DO rate-limits itself)
+  // scheduled: trigger both clears and members. DO will rate-limit actual members fetches using MIN_MEMBERS_UPDATE_INTERVAL_MS.
   async scheduled(event, env, ctx) {
     try {
       const id = env.GLOBAL_STATS.idFromName('global');
       const stub = env.GLOBAL_STATS.get(id);
-      // clear stats (frequent)
-      await stub.fetch('https://globalstats.local/update-clears', { method: 'POST' }).catch(() => {});
-      // members (infrequent) - DO will rate limit via MIN_MEMBERS_UPDATE_INTERVAL_MS
-      await stub.fetch('https://globalstats.local/update-members', { method: 'POST' }).catch(() => {});
+
+      // Trigger clears (expected to run often)
+      await stub.fetch('https://globalstats.local/update-clears', { method: 'POST' }).catch((e) => console.error('scheduled update-clears error', e));
+
+      // Trigger members (infrequent; DO enforces MIN_MEMBERS_UPDATE_INTERVAL_MS)
+      await stub.fetch('https://globalstats.local/update-members', { method: 'POST' }).catch((e) => console.error('scheduled update-members error', e));
     } catch (e) {
       console.error('scheduled handler error', e);
     }
   }
 };
 
+// GET /stats: read clears_snapshot + members_list and synthesize response
 async function handleGetStats(request, env) {
-  // 1) try canonical latest
+  let clears = null;
+  let membersList = null;
+
   try {
     if (env.BUNGIE_STATS) {
-      const raw = await env.BUNGIE_STATS.get('latest');
-      if (raw) return new Response(raw, { headers: { 'Content-Type': 'application/json' }});
+      const rawClears = await env.BUNGIE_STATS.get('clears_snapshot');
+      if (rawClears) clears = JSON.parse(rawClears);
     }
-  } catch (e) { /* ignore */ }
+  } catch (e) { clears = null; }
 
-  // 2) fallback: synthesize from members_list
   try {
     if (env.BUNGIE_STATS) {
-      const raw = await env.BUNGIE_STATS.get('members_list');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const members = parsed?.members ?? [];
-        const snapshot = { memberCount: members.length, clears: 0, prophecyClears: 0, updated: parsed?.fetchedAt ?? new Date().toISOString(), source: 'kv-fallback' };
-        return new Response(JSON.stringify(snapshot), { headers: { 'Content-Type': 'application/json' }});
-      }
+      const rawMembers = await env.BUNGIE_STATS.get('members_list');
+      if (rawMembers) membersList = JSON.parse(rawMembers);
     }
-  } catch (e) { /* ignore */ }
+  } catch (e) { membersList = null; }
 
-  // 3) final fallback zeros
-  return new Response(JSON.stringify({ memberCount: 0, clears: 0, prophecyClears: 0, updated: null }), { headers: { 'Content-Type': 'application/json' }});
+  const memberCount = Array.isArray(membersList?.members) ? membersList.members.length : 0;
+  const snapshot = {
+    memberCount,
+    clears: (clears && typeof clears.clears === 'number') ? clears.clears : 0,
+    prophecyClears: (clears && typeof clears.prophecyClears === 'number') ? clears.prophecyClears : 0,
+    updated: (clears && clears.fetchedAt) ? clears.fetchedAt : (membersList && membersList.fetchedAt) ? membersList.fetchedAt : null,
+    source: (clears ? 'clears_snapshot' : (membersList ? 'members_list_fallback' : 'empty'))
+  };
+
+  return new Response(JSON.stringify(snapshot), { headers: { 'Content-Type': 'application/json' }});
 }
 
+// GET /members: return KV.members_list only, shaped with memberCount (no DO call)
 async function handleGetMembers(request, env) {
   try {
     if (env.BUNGIE_STATS) {
       const raw = await env.BUNGIE_STATS.get('members_list');
       if (raw) {
-        const p = JSON.parse(raw);
-        return new Response(JSON.stringify({ fetchedAt: p.fetchedAt ?? new Date().toISOString(), members: p.members ?? [], memberCount: Array.isArray(p.members) ? p.members.length : 0 }), { headers: { 'Content-Type': 'application/json' }});
+        const parsed = JSON.parse(raw);
+        return new Response(JSON.stringify({
+          fetchedAt: parsed?.fetchedAt ?? new Date().toISOString(),
+          members: parsed?.members ?? [],
+          memberCount: Array.isArray(parsed?.members) ? parsed.members.length : 0
+        }), { headers: { 'Content-Type': 'application/json' }});
       }
     }
   } catch (e) { /* ignore */ }
 
-  // dummy fallback
+  // fallback (only used if KV is empty)
   const dummy = { fetchedAt: new Date().toISOString(), members: [{ displayName: 'PlayerOne', membershipId: '1' }], memberCount: 1 };
   return new Response(JSON.stringify(dummy), { headers: { 'Content-Type': 'application/json' }});
 }
 
+// POST/GET /run-update : admin-protected manual triggers
 async function handleRunUpdate(request, env) {
-  // admin token guard
   const token = request.headers.get('x-admin-token') || '';
-  if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) return new Response('Unauthorized', { status: 401 });
+  if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
+    return new Response('Unauthorized', { status: 401 });
+  }
 
-  // route action via body or path
   let body = null;
   if (request.method === 'POST') {
     try { body = await request.json().catch(() => null); } catch (e) { body = null; }
