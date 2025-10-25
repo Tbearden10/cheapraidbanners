@@ -2,27 +2,31 @@ name = "cheapraidbanners"
 compatibility_date = "2025-10-25"
 main = "src/index.js"
 
+# Replace with your account id
 account_id = "5e7fb995b74586d322a72a99770b31dc"
 
-# Cron schedule: run every 5 minutes
-[triggers]
-crons = ["*/1 * * * *"]
+# Register only the API routes the Worker should handle (Pages will handle the rest)
+routes = ["cheapraidbanners.com/stats*", "cheapraidbanners.com/run-update*"]
 
-# KV namespace binding - fill this ID after running kv namespace create or listing existing
+# Cron schedule: every 5 minutes
+[triggers]
+crons = ["*/5 * * * *"]
+
+# KV namespace binding - replace with the namespace id returned from `wrangler kv namespace create` or `kv namespace list`
 [[kv_namespaces]]
 binding = "BUNGIE_STATS"
 id = "0c93637a616346cdbc322b565f101124"
 
-# Durable Objects binding
+# Durable Objects
 [durable_objects]
   [[durable_objects.bindings]]
   name = "GLOBAL_STATS"
   class_name = "GlobalStats"
 
-# For Free plan: use new_sqlite_classes. Use a unique tag each time you create classes.
+# Free-plan Durable Objects need this migration form (use a unique tag)
 [[migrations]]
-tag = "add-globalstats-20251025-unique"
+tag = "add-globalstats-20251025-01"
 new_sqlite_classes = ["GlobalStats"]
 
-# top-level flag
+# Top-level flag
 workers_dev = false
