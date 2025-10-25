@@ -3,16 +3,17 @@ compatibility_date = "2025-10-25"
 main = "src/index.js"
 
 account_id = "5e7fb995b74586d322a72a99770b31dc"
+# zone_id = "YOUR_ZONE_ID" # optional
 
-routes = ["cheapraidbanners.com/stats*"]  
+# Route the stats endpoint to this worker (Pages will serve static files)
+routes = ["cheapraidbanners.com/stats*"]
 
 [triggers]
+crons = ["*/5 * * * *"]
 
-crons = ["*/1 * * * *"]
-
-# KV namespace binding: replace id with the namespace id you create (see next steps)
 [[kv_namespaces]]
 binding = "BUNGIE_STATS"
 id = "b7b45a67f08a49da9157cfcd57cda5b0"
 
+# top-level workers_dev flag (must NOT be inside [[kv_namespaces]])
 workers_dev = false
