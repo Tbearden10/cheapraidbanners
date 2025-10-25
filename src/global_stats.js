@@ -35,7 +35,7 @@ export class GlobalStats {
     // Example placeholder: if BUNGIE_API_KEY is present, you can call the real API here.
     // Use AbortController for timeouts and short retry logic.
     // For now return a stub value to test the pipeline.
-    return 5;
+    return 69;
   }
 
   async fetch(request) {
