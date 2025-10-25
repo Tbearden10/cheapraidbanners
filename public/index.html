@@ -20,6 +20,26 @@
           <div class="site">cheapraidbanners.com <span class="callsign">[flag]</span></div>
           <div class="motto">"50% off raid banners"</div>
           <div class="about">We have the cheapest raid banners around!</div>
+
+          <!-- actions: Request to join + member list (side-by-side) -->
+          <div class="actions" aria-hidden="false" style="margin-top:0.6rem; display:flex; gap:0.5rem; align-items:center;">
+            <a id="req-join"
+               class="action-btn"
+               href="https://www.bungie.net/en/ClanV2?groupid=5335552"
+               target="_blank"
+               rel="noopener noreferrer"
+               role="button"
+               style="text-decoration:none; padding:0.35rem 0.6rem; border-radius:4px; background:#0070f3; color:#fff; font-weight:600;">
+              Request to join
+            </a>
+
+            <button id="toggle-members"
+                    aria-expanded="false"
+                    aria-controls="member-list"
+                    style="padding:0.35rem 0.6rem; border-radius:4px; border:1px solid #ccc; background:#fff; cursor:pointer;">
+              Member list
+            </button>
+          </div>
         </div>
 
         <hr class="sep">
@@ -49,10 +69,8 @@
         </div>
       </div>
 
-      <!-- right: member list toggle (minimal) -->
-      <div class="right">
-        <button id="toggle-members" aria-expanded="false" aria-controls="member-list">▶</button>
-      </div>
+      <!-- right: member list toggle previously lived here; now empty -->
+      <div class="right" aria-hidden="true"></div>
     </article>
 
     <!-- member list area (appears to right on wide screens, below on narrow) -->
