@@ -1,7 +1,6 @@
 // src/index.js
-// Scheduled Worker: cron runs performUpdate(), which writes the latest JSON to KV.
-// Exposes GET /stats to return the latest KV value.
-// Replace dummyBungieFetch() with your Bungie API calls (use env.BUNGIE_API_KEY secret).
+// Worker entry: scheduled() triggers the singleton DO to update; GET /stats reads from KV
+// to keep visitor load cheap (KV reads scale). Admin endpoint triggers DO /set or /update.
 
 export default {
   async fetch(request, env) {
@@ -12,7 +11,6 @@ export default {
       return handleGetStats(request, env);
     }
 
-    // Optional admin endpoint to trigger an immediate update (protected by ADMIN_TOKEN)
     if (pathname === '/run-update' && (request.method === 'GET' || request.method === 'POST')) {
       return handleRunUpdate(request, env);
     }
@@ -22,9 +20,12 @@ export default {
 
   async scheduled(event, env, ctx) {
     try {
-      await performUpdate(env);
+      const id = env.GLOBAL_STATS.idFromName('global'); // singleton
+      const doStub = env.GLOBAL_STATS.get(id);
+      // fire-and-forget POST /update; DO enforces rate limits
+      await doStub.fetch('https://globalstats.local/update', { method: 'POST' });
     } catch (err) {
-      console.error('Scheduled update failed', err);
+      console.error('scheduled trigger failed', err);
     }
   }
 };
@@ -33,16 +34,12 @@ async function handleGetStats(request, env) {
   try {
     const raw = await env.BUNGIE_STATS.get('latest');
     if (!raw) {
-      return new Response(JSON.stringify({ clears: 0, updated: null }), {
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
-      });
+      return new Response(JSON.stringify({ clears: 0, updated: null }), { headers: { 'Content-Type': 'application/json' }});
     }
-    return new Response(raw, {
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=10, s-maxage=10' }
-    });
+    return new Response(raw, { headers: { 'Content-Type': 'application/json' }});
   } catch (err) {
     console.error('KV read error', err);
-    return new Response(JSON.stringify({ error: 'kv_error' }), { status: 500, headers: { 'Content-Type': 'application/json' }});
+    return new Response(JSON.stringify({ clears: 0, updated: null }), { status: 500, headers: { 'Content-Type': 'application/json' }});
   }
 }
 
@@ -51,29 +48,32 @@ async function handleRunUpdate(request, env) {
   if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
     return new Response('Unauthorized', { status: 401 });
   }
+
+  // If POST with { set: n } forward to DO /set; otherwise trigger DO /update
+  if (request.method === 'POST') {
+    try {
+      const body = await request.json().catch(() => null);
+      if (body && typeof body.set === 'number') {
+        const id = env.GLOBAL_STATS.idFromName('global');
+        const doStub = env.GLOBAL_STATS.get(id);
+        return await doStub.fetch('https://globalstats.local/set', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ set: body.set })
+        });
+      }
+    } catch (e) { /* ignore and fallthrough */ }
+  }
+
+  // trigger update
   try {
-    const result = await performUpdate(env);
-    return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' }});
+    const id = env.GLOBAL_STATS.idFromName('global');
+    const doStub = env.GLOBAL_STATS.get(id);
+    const res = await doStub.fetch('https://globalstats.local/update', { method: 'POST' });
+    const json = await res.json().catch(() => null);
+    return new Response(JSON.stringify(json || { ok: false }), { headers: { 'Content-Type': 'application/json' }});
   } catch (err) {
-    console.error('Manual update failed', err);
+    console.error('manual update failed', err);
     return new Response(JSON.stringify({ error: 'update_failed' }), { status: 500, headers: { 'Content-Type': 'application/json' }});
   }
-}
-
-async function performUpdate(env) {
-  // Replace with your Bungie API logic. For now we write a dummy payload:
-  const data = await dummyBungieFetch();
-
-  const payload = {
-    ...data,
-    updated: new Date().toISOString()
-  };
-
-  await env.BUNGIE_STATS.put('latest', JSON.stringify(payload));
-  return payload;
-}
-
-async function dummyBungieFetch() {
-  // deterministic test payload — you will replace this with real calls
-  return { clears: 5 };
 }

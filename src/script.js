@@ -1,52 +1,52 @@
 // public/script.js
-// Client polls /stats and updates DOM elements with id="bungie-clears" and id="bungie-updated".
-// It now defaults to 0 if the response is missing or fetch fails.
+// Client: fetch /stats and on each successful fetch increment the on-page displayed value by +1.
+// On first successful fetch we initialize the display to the authoritative value returned by /stats.
 
 (() => {
-  const STATS_PATH = '/stats';
-  const POLL_INTERVAL_MS = 30 * 1000; // adjust as desired
-  const CLEAR_EL_ID = 'bungie-clears';
-  const UPDATED_EL_ID = 'bungie-updated';
+  const PATH = '/stats';
+  const CLEAR_ID = 'bungie-clears';
+  const UPDATED_ID = 'bungie-updated';
+  const POLL_MS = 10_000; // faster for testing; adjust as desired
 
-  async function fetchStats() {
+  let firstLoad = true;
+
+  async function refresh() {
     try {
-      const res = await fetch(STATS_PATH, { cache: 'no-store' });
-      if (!res.ok) throw new Error('Network response not ok');
-      const json = await res.json();
-      updateUI(json);
-    } catch (err) {
-      console.error('Failed to fetch stats', err);
-      // on error, ensure UI still shows 0 and a sensible updated value
-      updateUI(null);
-    }
-  }
+      const res = await fetch(PATH, { cache: 'no-store' });
+      if (!res.ok) throw new Error('network');
+      const j = await res.json();
 
-  function updateUI(json) {
-    const clearEl = document.getElementById(CLEAR_EL_ID);
-    const updatedEl = document.getElementById(UPDATED_EL_ID);
+      // If this is the first successful fetch, set the displayed value to the authoritative value.
+      // On subsequent successful fetches, increment the displayed value locally by +1 for testing.
+      const elC = document.getElementById(CLEAR_ID);
+      const elU = document.getElementById(UPDATED_ID);
+      if (!elC) return;
 
-    // Default clears to 0 when JSON missing or clears undefined
-    const clears = (json && typeof json.clears !== 'undefined') ? Number(json.clears) : 0;
-    if (clearEl) clearEl.textContent = String(clears);
-
-    // Show timestamp if present, otherwise show "never"
-    if (updatedEl) {
-      if (json && json.updated) {
-        updatedEl.textContent = new Date(json.updated).toLocaleString();
+      if (firstLoad) {
+        const base = (j && typeof j.clears === 'number') ? j.clears : 0;
+        elC.textContent = String(base);
+        firstLoad = false;
       } else {
-        updatedEl.textContent = 'never';
+        const cur = Number(elC.textContent) || 0;
+        elC.textContent = String(cur + 1);
       }
+
+      if (elU) {
+        elU.textContent = (j && j.updated) ? new Date(j.updated).toLocaleString() : 'never';
+      }
+    } catch (e) {
+      console.error('fetch stats failed', e);
+      // on error, do not change the displayed value; keep testing increments only on success
     }
   }
 
-  // Start polling once DOM is ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
-      fetchStats();
-      setInterval(fetchStats, POLL_INTERVAL_MS);
+      refresh();
+      setInterval(refresh, POLL_MS);
     });
   } else {
-    fetchStats();
-    setInterval(fetchStats, POLL_INTERVAL_MS);
+    refresh();
+    setInterval(refresh, POLL_MS);
   }
 })();

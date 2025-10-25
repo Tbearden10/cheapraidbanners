@@ -4,19 +4,13 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>cheapraidbanners</title>
-
-  <!-- Optional: load Inter from Google (fallbacks are in CSS) -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&display=swap" rel="stylesheet">
-
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <main class="center-content">
     <div class="card">
       <h1 class="site-title">Cheap Raid Banners</h1>
-      <p class="subtitle">A tiny live counter showing raid clears.</p>
+      <p class="subtitle">Live Bungie statistic</p>
 
       <div class="stats" role="list" aria-label="Stats">
         <div class="stat-pill" role="listitem" aria-label="Clears">
@@ -24,21 +18,9 @@
           <span id="bungie-clears" class="stat-value">0</span>
           <span class="stat-updated" id="bungie-updated">never</span>
         </div>
-
-        <div class="stat-pill" role="listitem" aria-label="Info">
-          <span class="stat-label">Status</span>
-          <span class="stat-value">Online</span>
-          <span class="stat-updated">Auto-updates periodically</span>
-        </div>
       </div>
     </div>
   </main>
-
-  <!-- Optional discrete top-right badge (remove if not desired) -->
-  <div class="visitor-badge" aria-hidden="true">
-    <div class="visitor-label">Live</div>
-    <div class="visitor-count">●</div>
-  </div>
 
   <script src="/script.js" defer></script>
 </body>

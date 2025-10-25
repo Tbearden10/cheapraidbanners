@@ -3,17 +3,29 @@ compatibility_date = "2025-10-25"
 main = "src/index.js"
 
 account_id = "5e7fb995b74586d322a72a99770b31dc"
-# zone_id = "YOUR_ZONE_ID" # optional
 
-# Route the stats endpoint to this worker (Pages will serve static files)
-routes = ["cheapraidbanners.com/stats*"]
-
+# Cron schedule: run every 5 minutes (adjust if needed)
 [triggers]
 crons = ["*/5 * * * *"]
 
+# Use an existing KV namespace id (replace the id below with the one returned by
+# `npx wrangler kv namespace list` if different).
 [[kv_namespaces]]
 binding = "BUNGIE_STATS"
 id = "b7b45a67f08a49da9157cfcd57cda5b0"
 
-# top-level workers_dev flag (must NOT be inside [[kv_namespaces]])
+# Durable Objects binding (class_name must match the exported class in src/global_stats.js)
+[durable_objects]
+  [[durable_objects.bindings]]
+  name = "GLOBAL_STATS"
+  class_name = "GlobalStats"
+
+# Migration block: when adding a new Durable Object class you must add a migration.
+# If you already used tag "v1" in previous deploys, change tag to a different value
+# (e.g. "v2") to avoid conflicts. If unsure, try "v1" first.
+[[migrations]]
+tag = "v1"
+new_classes = ["GlobalStats"]
+
+# Top-level workers_dev flag (must NOT be inside any other table)
 workers_dev = false
