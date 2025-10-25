@@ -1,90 +1,56 @@
-# React + Vite + Hono + Cloudflare Workers
+```markdown
+# live-visitor-counter
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/templates/tree/main/vite-react-template)
+Cloudflare Workers + Durable Objects example for a simple live visitor count (SSE).
 
-This template provides a minimal setup for building a React application with TypeScript and Vite, designed to run on Cloudflare Workers. It features hot module replacement, ESLint integration, and the flexibility of Workers deployments.
+- VisitorCounter DO (SSE) provides an accurate live count.
+- Router worker forwards `/events` and `/count` to the Durable Object.
+- Example static client in `public/index.html` with styles in `public/styles.css`.
 
-![React + TypeScript + Vite + Cloudflare Workers](https://imagedelivery.net/wSMYJvS3Xw-n339CbDyDIA/fc7b4b62-442b-4769-641b-ad4422d74300/public)
+## Directory structure
 
-<!-- dash-content-start -->
+- wrangler.toml
+- src/index.js
+- src/visitor_counter.js
+- public/index.html
+- public/styles.css
 
-🚀 Supercharge your web development with this powerful stack:
+## Quick local dev
 
-- [**React**](https://react.dev/) - A modern UI library for building interactive interfaces
-- [**Vite**](https://vite.dev/) - Lightning-fast build tooling and development server
-- [**Hono**](https://hono.dev/) - Ultralight, modern backend framework
-- [**Cloudflare Workers**](https://developers.cloudflare.com/workers/) - Edge computing platform for global deployment
+1. Install wrangler (v2): `npm install -g wrangler`
+2. Login: `wrangler login`
+3. From project root: `wrangler dev`
 
-### ✨ Key Features
+## Set account id
 
-- 🔥 Hot Module Replacement (HMR) for rapid development
-- 📦 TypeScript support out of the box
-- 🛠️ ESLint configuration included
-- ⚡ Zero-config deployment to Cloudflare's global network
-- 🎯 API routes with Hono's elegant routing
-- 🔄 Full-stack development setup
-- 🔎 Built-in Observability to monitor your Worker
+Edit `wrangler.toml` and replace `YOUR_ACCOUNT_ID` with your Cloudflare account ID (from the dashboard).
 
-Get started in minutes with local development or deploy directly via the Cloudflare dashboard. Perfect for building modern, performant web applications at the edge.
+## Publish
 
-<!-- dash-content-end -->
+1. `wrangler publish`
 
-## Getting Started
+Durable Object namespaces/bindings declared in `wrangler.toml` will be created as part of the publish.
 
-To start a new project with this template, run:
+## Routes (Cloudflare Dashboard)
 
-```bash
-npm create cloudflare@latest -- --template=cloudflare/templates/vite-react-template
+If you want the worker to run under your domain:
+
+1. In Cloudflare Dashboard → Workers → Manage Workers, find `live-visitor-counter`.
+2. Add route patterns for the endpoints:
+   - example.com/events*
+   - example.com/count*
+3. If you host static assets on the same domain, ensure the route patterns only match the API paths, not your static assets.
+
+## How the client works
+
+- The client generates (and persists in localStorage) a visitor UID to dedupe multiple tabs.
+- The client opens an EventSource to `/events?uid=<uid>` and listens for `liveCount` events (SSE).
+- `/count` returns a JSON snapshot: `{ count: <uniqueVisitors> }`.
+
+## Notes
+
+- SSE is one-way (server → client) and auto-reconnects in browsers.
+- Durable Objects remove the need for an external DB for presence coordination.
+- Check DO pricing/limits if you expect very high concurrent SSE connections.
+- If you want the Worker to serve the static site directly (Workers Sites or Pages), I can add that configuration.
 ```
-
-A live deployment of this template is available at:
-[https://react-vite-template.templates.workers.dev](https://react-vite-template.templates.workers.dev)
-
-## Development
-
-Install dependencies:
-
-```bash
-npm install
-```
-
-Start the development server with:
-
-```bash
-npm run dev
-```
-
-Your application will be available at [http://localhost:5173](http://localhost:5173).
-
-## Production
-
-Build your project for production:
-
-```bash
-npm run build
-```
-
-Preview your build locally:
-
-```bash
-npm run preview
-```
-
-Deploy your project to Cloudflare Workers:
-
-```bash
-npm run build && npm run deploy
-```
-
-Monitor your workers:
-
-```bash
-npx wrangler tail
-```
-
-## Additional Resources
-
-- [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
-- [Vite Documentation](https://vitejs.dev/guide/)
-- [React Documentation](https://reactjs.org/)
-- [Hono Documentation](https://hono.dev/)

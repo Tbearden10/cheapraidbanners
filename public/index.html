@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>cheapraidbanners.com</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="center-content" aria-hidden="false">
+    <h1 class="site-title">cheapraidbanners.com</h1>
+  </div>
+
+  <div class="visitor-badge" role="status" aria-live="polite" aria-label="Live visitor count">
+    <div class="visitor-label">Visitors</div>
+    <div id="visitor-count" class="visitor-count">0</div>
+  </div>
+
+  <script>
+    // Production client: only fetches count once on page load (no SSE, no polling)
+    (function () {
+      const countEl = document.getElementById('visitor-count');
+
+      // show 0 immediately to avoid flash
+      countEl.textContent = '0';
+
+      async function fetchCountOnce() {
+        try {
+          const res = await fetch('/count', { cache: 'no-store' });
+          if (!res.ok) return;
+          const json = await res.json();
+          const num = (json && typeof json.count === 'number') ? json.count : 0;
+          countEl.textContent = String(num);
+        } catch (e) {
+          // fail quietly in production -- keep displaying 0
+        }
+      }
+
+      // Run once on load
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', fetchCountOnce, { once: true });
+      } else {
+        fetchCountOnce();
+      }
+    })();
+  </script>
+</body>
+</html>
