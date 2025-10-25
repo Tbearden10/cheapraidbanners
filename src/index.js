@@ -1,6 +1,7 @@
 // src/index.js
-// Worker entry: scheduled() triggers the singleton DO to update; GET /stats reads from KV
-// to keep visitor load cheap (KV reads scale). Admin endpoint triggers DO /set or /update.
+// Export the Durable Object class so Wrangler knows it's provided by this script.
+// Re-export from the file that implements it.
+export { GlobalStats } from "./global_stats.js";
 
 export default {
   async fetch(request, env) {
@@ -20,9 +21,9 @@ export default {
 
   async scheduled(event, env, ctx) {
     try {
-      const id = env.GLOBAL_STATS.idFromName('global'); // singleton
+      const id = env.GLOBAL_STATS.idFromName('global');
       const doStub = env.GLOBAL_STATS.get(id);
-      // fire-and-forget POST /update; DO enforces rate limits
+      // Ask the singleton DO to update (DO enforces rate-limits)
       await doStub.fetch('https://globalstats.local/update', { method: 'POST' });
     } catch (err) {
       console.error('scheduled trigger failed', err);
@@ -49,7 +50,7 @@ async function handleRunUpdate(request, env) {
     return new Response('Unauthorized', { status: 401 });
   }
 
-  // If POST with { set: n } forward to DO /set; otherwise trigger DO /update
+  // POST { set: n } -> forward to DO /set; otherwise trigger DO /update
   if (request.method === 'POST') {
     try {
       const body = await request.json().catch(() => null);
@@ -62,10 +63,9 @@ async function handleRunUpdate(request, env) {
           body: JSON.stringify({ set: body.set })
         });
       }
-    } catch (e) { /* ignore and fallthrough */ }
+    } catch (e) {}
   }
 
-  // trigger update
   try {
     const id = env.GLOBAL_STATS.idFromName('global');
     const doStub = env.GLOBAL_STATS.get(id);

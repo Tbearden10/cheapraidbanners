@@ -4,28 +4,26 @@ main = "src/index.js"
 
 account_id = "5e7fb995b74586d322a72a99770b31dc"
 
-# Cron schedule: run every 5 minutes (adjust if needed)
+# Cron schedule
 [triggers]
 crons = ["*/5 * * * *"]
 
-# Use an existing KV namespace id (replace the id below with the one returned by
-# `npx wrangler kv namespace list` if different).
+# KV namespace binding (replace with the actual namespace id from `npx wrangler kv namespace list`)
 [[kv_namespaces]]
 binding = "BUNGIE_STATS"
 id = "b7b45a67f08a49da9157cfcd57cda5b0"
 
-# Durable Objects binding (class_name must match the exported class in src/global_stats.js)
+# Durable Objects binding
 [durable_objects]
   [[durable_objects.bindings]]
   name = "GLOBAL_STATS"
   class_name = "GlobalStats"
 
-# Migration block: when adding a new Durable Object class you must add a migration.
-# If you already used tag "v1" in previous deploys, change tag to a different value
-# (e.g. "v2") to avoid conflicts. If unsure, try "v1" first.
+# For Free-plan accounts, use new_sqlite_classes to create the SQLite-backed DO namespace.
+# Use a unique migration tag that hasn't been applied before (here: add-globalstats-20251025).
 [[migrations]]
-tag = "v1"
-new_classes = ["GlobalStats"]
+tag = "add-globalstats-20251025"
+new_sqlite_classes = ["GlobalStats"]
 
-# Top-level workers_dev flag (must NOT be inside any other table)
+# top-level flag — must be at top-level (not inside any table)
 workers_dev = false
