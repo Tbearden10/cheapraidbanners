@@ -1,7 +1,4 @@
 // src/global_stats.js
-// Durable Object: GlobalStats (single authoritative instance)
-// Test stub: _fetchBungieCount returns 5 for now.
-
 export class GlobalStats {
   constructor(state, env) {
     this.state = state;
@@ -24,15 +21,14 @@ export class GlobalStats {
 
   async fetch(request) {
     await this._ensure();
-    const url = new URL(request.url);
-    const pathname = url.pathname.replace(/^\//, '') || '';
+    const path = new URL(request.url).pathname.replace(/^\//, '') || '';
 
-    if (request.method === 'GET' && (pathname === '' || pathname === '/')) {
+    if (request.method === 'GET' && (path === '' || path === '/')) {
       const current = await this.state.storage.get('data');
       return new Response(JSON.stringify(current), { headers: { 'Content-Type': 'application/json' }});
     }
 
-    if (request.method === 'POST' && pathname === 'update') {
+    if (request.method === 'POST' && path === 'update') {
       const last = (await this.state.storage.get('lastUpdateAt')) || 0;
       const now = Date.now();
       const minIntervalMs = 20 * 1000;
@@ -43,28 +39,20 @@ export class GlobalStats {
 
       await this.state.storage.put('lastUpdateAt', now);
 
-      // TEST STUB: return 5 for now
+      // TEST: stub value (5). Replace with real Bungie fetch when ready.
       const count = 5;
 
       if (typeof count === 'number') {
         const newObj = { clears: Math.max(0, Math.floor(count)), updated: new Date().toISOString(), source: 'bungie-stub' };
         await this._atomicWrite(newObj);
-
-        // Best-effort KV backup
-        try {
-          if (this.env.BUNGIE_STATS) {
-            await this.env.BUNGIE_STATS.put('latest', JSON.stringify(newObj));
-          }
-        } catch (e) {}
-
+        try { if (this.env.BUNGIE_STATS) await this.env.BUNGIE_STATS.put('latest', JSON.stringify(newObj)); } catch(e){}
         return new Response(JSON.stringify({ ok: true, updated: newObj }), { headers: { 'Content-Type': 'application/json' }});
       }
-
       const current = await this.state.storage.get('data');
       return new Response(JSON.stringify({ ok: false, reason: 'fetch_failed', current }), { headers: { 'Content-Type': 'application/json' }});
     }
 
-    if (request.method === 'POST' && pathname === 'set') {
+    if (request.method === 'POST' && path === 'set') {
       let body = null;
       try { body = await request.json().catch(() => null); } catch(e){ body = null; }
       if (body && typeof body.set === 'number') {
