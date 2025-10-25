@@ -1,25 +1,31 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>cheapraidbanners</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cheap Raid Banners</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <main class="center-content">
-    <div class="card">
+  <main class="center-content" role="main">
+    <div class="card" aria-live="polite">
       <h1 class="site-title">Cheap Raid Banners</h1>
       <p class="subtitle">Live Bungie statistic</p>
+
       <div class="stats" role="list" aria-label="Stats">
         <div class="stat-pill" role="listitem" aria-label="Clears">
           <span class="stat-label">Clears</span>
+          <!-- ID expected by script.js -->
           <span id="bungie-clears" class="stat-value">0</span>
           <span class="stat-updated" id="bungie-updated">never</span>
         </div>
       </div>
+
+      <noscript class="muted" aria-hidden="false">JavaScript is required for live updates.</noscript>
+      <p class="muted small">Last update shown is the authoritative value stored in the backend KV.</p>
     </div>
   </main>
+
   <script src="/script.js" defer></script>
 </body>
 </html>

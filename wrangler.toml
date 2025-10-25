@@ -26,7 +26,7 @@ id = "0c93637a616346cdbc322b565f101124"
 # Free-plan Durable Objects need this migration form (use a unique tag)
 [[migrations]]
 tag = "add-globalstats-20251025-01"
-new_sqlite_classes = ["GlobalStats"]
+
 
 # Top-level flag
 workers_dev = false
