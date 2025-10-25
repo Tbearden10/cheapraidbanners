@@ -13,7 +13,7 @@ routes = ["cheapraidbanners.com/stats*", "cheapraidbanners.com/run-update*"]
 crons = [
   "*/5 8-21 * * *",   # every 5 minutes between 08:00 and 21:59 UTC (day)
   "*/15 22-23 * * *", # every 30 minutes between 22:00 and 23:59 UTC (night)
-  "*/60 0-7 * * *"    # every 30 minutes between 00:00 and 07:59 UTC (night)
+  "*/30 0-7 * * *"    # every 30 minutes between 00:00 and 07:59 UTC (night)
 ]
 
 # KV namespace binding - replace with the namespace id returned from `wrangler kv namespace create` or `kv namespace list`
