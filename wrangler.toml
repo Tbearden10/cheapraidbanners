@@ -1,6 +1,12 @@
+name = "cheapraidbanners"
+type = "javascript"
+
 [[durable_objects.bindings]]
 name = "LIVE_USERS"
 class_name = "LiveUsers"
+
+[build]
+command = "npm run build"
 
 [build.upload]
 format = "modules"

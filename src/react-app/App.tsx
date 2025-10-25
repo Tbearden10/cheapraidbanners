@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState, useEffect } from "react";
 import reactLogo from "./assets/react.svg";
 import viteLogo from "/vite.svg";
 import cloudflareLogo from "./assets/Cloudflare_Logo.svg";
@@ -9,22 +9,23 @@ function App() {
   const [online, setOnline] = useState<number | null>(null);
 
   useEffect(() => {
-    const connect = () => {
-      const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(`${wsProtocol}//${location.host}/api/live`);
+    // WebSocket connection to DO
+    const ws = new WebSocket(
+      `${location.origin.replace(/^http/, "ws")}/api/live`
+    );
 
-      ws.onmessage = (event) => {
+    ws.onopen = () => console.log("Connected to LiveUsers WebSocket");
+
+    ws.onmessage = (event) => {
+      try {
         const data = JSON.parse(event.data);
-        if (data.online !== undefined) setOnline(data.online);
-      };
-
-      ws.onclose = () => {
-        // reconnect after delay
-        setTimeout(connect, 3000);
-      };
+        setOnline(data.online);
+      } catch {}
     };
 
-    connect();
+    ws.onclose = () => console.log("LiveUsers WebSocket closed");
+
+    return () => ws.close();
   }, []);
 
   return (
@@ -51,10 +52,28 @@ function App() {
       <h1 className="site-title">cheapraidbanners.com</h1>
 
       <div className="card">
-        <p className="text-xl">Live Visitors: {online ?? "..."}</p>
+        <button onClick={() => alert("Soon™")} aria-label="placeholder-button">
+          Coming Soon
+        </button>
       </div>
 
-      <p className="read-the-docs">Built with Cloudflare + Hono + React + Vite</p>
+      {/* Live visitor tracker */}
+      <div
+        style={{
+          position: "absolute",
+          bottom: "10px",
+          right: "10px",
+          fontSize: "0.8rem",
+          color: "#888",
+          opacity: 0.8,
+        }}
+      >
+        {online !== null ? `Live visitors: ${online}` : "Connecting..."}
+      </div>
+
+      <p className="read-the-docs">
+        Built with Cloudflare + Hono + React + Vite
+      </p>
     </div>
   );
 }
