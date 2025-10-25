@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "build": "echo \"noop\"",
     "dev": "wrangler dev --local --assets ./public",
-    "publish": "wrangler publish"
+    "deploy": "wrangler deploy"
   },
   "devDependencies": {
     "miniflare": "^4.0.0",
