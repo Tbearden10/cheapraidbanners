@@ -66,7 +66,7 @@ export class GlobalStats {
       try {
         // Insert real fetch logic here, using this.env.BUNGIE_API_KEY if available.
         // Example: count = await this._fetchBungieCountWithTimeout();
-        count = await this._fetchBungieCount();
+        count = count + await this._fetchBungieCount();
       } catch (err) {
         console.error('external fetch failed', err);
       }
