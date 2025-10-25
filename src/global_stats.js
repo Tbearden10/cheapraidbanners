@@ -4,107 +4,155 @@ export class GlobalStats {
     this.env = env;
   }
 
-  // simple helper: write debug to state storage
-  async _writeDebug(obj) {
-    try { await this.state.storage.put('lastDebug', obj); } catch (e) { /* ignore */ }
-  }
+  // NOTE: KV calls are intentionally commented out. Re-enable if/when you want to persist.
+  // Example (commented):
+  // async _kvPut(key, obj) { if (!this.env.BUNGIE_STATS) return; await this.env.BUNGIE_STATS.put(key, JSON.stringify(obj)); }
+  // async _kvGet(key) { if (!this.env.BUNGIE_STATS) return null; const raw = await this.env.BUNGIE_STATS.get(key); return raw ? JSON.parse(raw) : null; }
 
-  // fetch with timeout
   async _fetchWithTimeout(url, opts = {}, timeoutMs = 8000) {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const id = setTimeout(() => ctrl.abort(), timeoutMs);
+    const method = opts.method ?? 'GET';
+    const start = Date.now();
     try {
+      console.log('[DO] fetch start', method, url);
       const res = await fetch(url, { ...opts, signal: ctrl.signal });
-      clearTimeout(timer);
+      console.log('[DO] fetch done', url, 'status', res.status, 'took', Date.now() - start, 'ms');
       return res;
-    } finally { clearTimeout(timer); }
+    } catch (err) {
+      console.warn('[DO] fetch error', url, err && (err.name || err.message));
+      throw err;
+    } finally {
+      clearTimeout(id);
+    }
   }
 
-  // Map Bungie result -> minimal member
   _mapBungieResultToMember(result) {
     const destiny = result?.destinyUserInfo ?? {};
     const bungie = result?.bungieNetUserInfo ?? {};
     return {
       membershipId: String(destiny.membershipId ?? bungie.membershipId ?? ''),
+      membershipType: Number(destiny.membershipType ?? bungie.membershipType ?? 0),
       displayName: destiny.displayName ?? bungie.displayName ?? '',
-      membershipType: Number(destiny.membershipType ?? bungie.membershipType ?? 0)
+      supplementalDisplayName: bungie.supplementalDisplayName ?? '',
+      isOnline: !!result.isOnline,
+      joinDate: result.joinDate ?? null,
+      memberType: result.memberType ?? null
     };
   }
 
-  // POST /update-members -> fetch roster from Bungie and write to KV
-  async _handleUpdateMembers({ force = false } = {}) {
-    // simple rate-limit: optional
-    const last = (await this.state.storage.get('lastMembersUpdateAt')) || 0;
-    const minMs = Number(this.env.MIN_MEMBERS_UPDATE_INTERVAL_MS || 0); // 0 means no rate-limit in this simple setup
-    const now = Date.now();
-    if (!force && minMs > 0 && now - last < minMs) {
-      const next = last + minMs;
-      await this._writeDebug({ event: 'rate_limited', next });
-      return { ok: false, reason: 'rate_limited', nextAllowedAt: next };
-    }
-    await this.state.storage.put('lastMembersUpdateAt', now);
-
-    // build roster URL
+  async _fetchClanRosterRaw() {
     const clanId = this.env.BUNGIE_CLAN_ID;
     const template = this.env.BUNGIE_CLAN_ROSTER_ENDPOINT;
     if (!clanId || !template) {
-      await this._writeDebug({ event: 'missing_config' });
-      return { ok: false, reason: 'missing_config' };
+      const err = new Error('missing BUNGIE_CLAN_ID or BUNGIE_CLAN_ROSTER_ENDPOINT');
+      err.code = 'missing_config';
+      throw err;
     }
     const url = template.replace('{clanId}', encodeURIComponent(clanId));
     const headers = { Accept: 'application/json' };
     if (this.env.BUNGIE_API_KEY) headers['X-API-Key'] = this.env.BUNGIE_API_KEY;
 
-    let res;
-    try {
-      res = await this._fetchWithTimeout(url, { method: 'GET', headers }, Number(this.env.BUNGIE_PER_REQUEST_TIMEOUT_MS || 8000));
-    } catch (e) {
-      await this._writeDebug({ event: 'fetch_error', error: String(e) });
-      return { ok: false, reason: 'fetch_failed' };
-    }
+    const timeoutMs = Number(this.env.BUNGIE_PER_REQUEST_TIMEOUT_MS || 8000);
+    const res = await this._fetchWithTimeout(url, { method: 'GET', headers }, timeoutMs);
     if (!res || !res.ok) {
-      await this._writeDebug({ event: 'fetch_non_ok', status: res && res.status });
-      return { ok: false, reason: 'fetch_failed', status: res && res.status };
+      const err = new Error(`bungie responded ${res ? res.status : 'no_response'}`);
+      err.code = 'bungie_non_ok';
+      err.status = res ? res.status : null;
+      throw err;
     }
-
-    let payload;
-    try { payload = await res.json(); } catch (e) { payload = null; }
-    const arr = payload?.Response?.results ?? payload?.results ?? payload?.members ?? [];
-    const members = Array.isArray(arr) ? arr.map(r => this._mapBungieResultToMember(r)) : [];
-
-    // write to KV (binding BUNGIE_STATS required)
-    const fetchedAt = new Date().toISOString();
-    if (this.env.BUNGIE_STATS) {
-      try {
-        await this.env.BUNGIE_STATS.put('members_list', JSON.stringify({ fetchedAt, members }));
-      } catch (e) {
-        await this._writeDebug({ event: 'kv_put_failed', error: String(e) });
-        return { ok: false, reason: 'kv_put_failed' };
-      }
+    const payload = await res.json().catch(() => null);
+    if (!payload) {
+      const err = new Error('invalid_json_from_bungie');
+      err.code = 'invalid_json';
+      throw err;
     }
-
-    await this.state.storage.put('lastMembersFetchedAt', fetchedAt);
-    await this._writeDebug({ event: 'success', count: members.length, fetchedAt });
-    return { ok: true, memberCount: members.length, fetchedAt };
+    const arr = payload?.Response?.results ?? payload?.results ?? payload?.members ?? null;
+    if (!Array.isArray(arr)) {
+      const err = new Error('unexpected_payload_shape');
+      err.code = 'unexpected_payload_shape';
+      err.payload = payload;
+      throw err;
+    }
+    return arr;
   }
 
-  // DO fetch handler
+  // POST /update-members -> fetch roster directly from Bungie and return members in response
+  async _handleUpdateMembers({ force = false } = {}) {
+    // rate-limit logic can remain (DO-level). We will still allow force via admin header.
+    const last = (await this.state.storage.get('lastMembersUpdateAt')) || 0;
+    const minMs = Number(this.env.MIN_MEMBERS_UPDATE_INTERVAL_MS || 0);
+    const now = Date.now();
+    if (!force && minMs > 0 && now - last < minMs) {
+      return { ok: false, reason: 'rate_limited', nextAllowedAt: last + minMs };
+    }
+    await this.state.storage.put('lastMembersUpdateAt', now);
+
+    // fetch roster
+    const raw = await this._fetchClanRosterRaw();
+    const members = raw.map(r => this._mapBungieResultToMember(r));
+    const fetchedAt = new Date().toISOString();
+
+    // KV write intentionally disabled. Uncomment to persist.
+    // if (this.env.BUNGIE_STATS) {
+    //   await this.env.BUNGIE_STATS.put('members_list', JSON.stringify({ fetchedAt, members }));
+    // }
+
+    await this.state.storage.put('lastMembersFetchedAt', fetchedAt);
+    return { ok: true, members, fetchedAt, memberCount: members.length };
+  }
+
+  // POST /update-clears -> compute a minimal clears snapshot from the live roster (no KV)
+  async _handleUpdateClears() {
+    const raw = await this._fetchClanRosterRaw();
+    const members = raw.map(r => this._mapBungieResultToMember(r));
+    const computed = { clears: members.length, prophecyClears: 0, perMember: null };
+    const snapshot = { fetchedAt: new Date().toISOString(), clears: computed.clears, prophecyClears: computed.prophecyClears, perMember: computed.perMember };
+
+    // KV write intentionally disabled. Uncomment to persist.
+    // if (this.env.BUNGIE_STATS) {
+    //   await this.env.BUNGIE_STATS.put('clears_snapshot', JSON.stringify(snapshot));
+    // }
+
+    await this.state.storage.put('lastClearsFetchedAt', snapshot.fetchedAt);
+    return { ok: true, snapshot };
+  }
+
   async fetch(request) {
     const path = new URL(request.url).pathname.replace(/^\//, '') || '';
 
-    // POST /update-members -> perform fetch & KV write
+    // POST /update-members
     if (request.method === 'POST' && path === 'update-members') {
-      // allow force via x-admin-token header -> bypass rate-limit
+      // Allow force via admin header
       const adminHeader = request.headers.get('x-admin-token') || '';
       const force = !!(adminHeader && this.env.ADMIN_TOKEN && adminHeader === this.env.ADMIN_TOKEN);
-      return new Response(JSON.stringify(await this._handleUpdateMembers({ force })), { headers: { 'Content-Type': 'application/json' }});
+      try {
+        const out = await this._handleUpdateMembers({ force });
+        return new Response(JSON.stringify(out), { headers: { 'Content-Type': 'application/json' }});
+      } catch (e) {
+        const body = { ok: false, reason: e.code || 'fetch_failed', error: e.message || String(e) };
+        if (e.status) body.status = e.status;
+        return new Response(JSON.stringify(body), { status: 502, headers: { 'Content-Type': 'application/json' }});
+      }
     }
 
-    // GET /debug -> return last debug (small)
+    // POST /update-clears
+    if (request.method === 'POST' && path === 'update-clears') {
+      try {
+        const out = await this._handleUpdateClears();
+        return new Response(JSON.stringify(out), { headers: { 'Content-Type': 'application/json' }});
+      } catch (e) {
+        const body = { ok: false, reason: e.code || 'fetch_failed', error: e.message || String(e) };
+        if (e.status) body.status = e.status;
+        return new Response(JSON.stringify(body), { status: 502, headers: { 'Content-Type': 'application/json' }});
+      }
+    }
+
+    // GET /debug -> basic DO timestamps
     if (request.method === 'GET' && path === 'debug') {
-      const debug = await this.state.storage.get('lastDebug') || null;
-      const lastMembersFetchedAt = await this.state.storage.get('lastMembersFetchedAt') || null;
-      return new Response(JSON.stringify({ debug, lastMembersFetchedAt }), { headers: { 'Content-Type': 'application/json' }});
+      const lastMembers = await this.state.storage.get('lastMembersFetchedAt') || null;
+      const lastClears = await this.state.storage.get('lastClearsFetchedAt') || null;
+      return new Response(JSON.stringify({ lastMembers, lastClears }), { headers: { 'Content-Type': 'application/json' }});
     }
 
     return new Response('Not found', { status: 404 });

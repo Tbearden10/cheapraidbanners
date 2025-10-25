@@ -19,15 +19,17 @@ crons = [
 
 [[kv_namespaces]]
 binding = "BUNGIE_STATS"
-id = "369e27f8c9514999aa11d1dd5aacbb19"
+id = "9143657b87494c198d23b598ceed6cef"
 
 [durable_objects]
 bindings = [
   { name = "GLOBAL_STATS", class_name = "GlobalStats" }
 ]
 
+# Create migration for a new SQLite-backed Durable Object class
 [[migrations]]
-tag = "add-globalstats-20251025-01"
+tag = "create-globalstats-20251025-v1"
+new_sqlite_classes = ["GlobalStats"]
 
 workers_dev = false
 
