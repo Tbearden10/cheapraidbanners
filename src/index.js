@@ -5,7 +5,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // GET /stats -> synthesize from clears_snapshot + members_list (memberCount always from members_list)
+    // GET /stats -> synthesize from clears_snapshot + members_list (BUT do NOT include memberCount)
     if ((path === '/stats' || path === '/') && request.method === 'GET') {
       return handleGetStats(request, env);
     }
@@ -41,6 +41,7 @@ export default {
 };
 
 // GET /stats: read clears_snapshot + members_list and synthesize response
+// NOTE: memberCount is intentionally NOT included here; clients should use GET /members for member count.
 async function handleGetStats(request, env) {
   let clears = null;
   let membersList = null;
@@ -59,11 +60,11 @@ async function handleGetStats(request, env) {
     }
   } catch (e) { membersList = null; }
 
-  const memberCount = Array.isArray(membersList?.members) ? membersList.members.length : 0;
+  // Note: memberCount intentionally omitted from stats response.
   const snapshot = {
-    memberCount,
     clears: (clears && typeof clears.clears === 'number') ? clears.clears : 0,
     prophecyClears: (clears && typeof clears.prophecyClears === 'number') ? clears.prophecyClears : 0,
+    // prefer clears_snapshot.fetchedAt, otherwise members_list.fetchedAt
     updated: (clears && clears.fetchedAt) ? clears.fetchedAt : (membersList && membersList.fetchedAt) ? membersList.fetchedAt : null,
     source: (clears ? 'clears_snapshot' : (membersList ? 'members_list_fallback' : 'empty'))
   };
