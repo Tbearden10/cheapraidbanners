@@ -28,8 +28,8 @@ export class GlobalStats {
     } finally { clearTimeout(timer); }
   }
 
-  // Normalize roster payload into minimal array [{ membershipId, membershipType, displayName }]
-  async _fetchClanRoster() {
+  // Fetch raw clan roster (returns array of result objects from Bungie)
+  async _fetchClanRosterRaw() {
     const clanId = this.env.BUNGIE_CLAN_ID;
     const template = this.env.BUNGIE_CLAN_ROSTER_ENDPOINT;
     if (!clanId || !template) return null;
@@ -45,33 +45,106 @@ export class GlobalStats {
     let payload;
     try { payload = await res.json(); } catch (e) { return null; }
 
-    // Try common shapes
-    let arr = payload?.Response?.results ?? payload?.results ?? payload?.members ?? null;
-    if (!Array.isArray(arr) && Array.isArray(payload?.Response?.results)) {
-      arr = payload.Response.results.map(r => r?.member ?? r);
-    }
+    // Expect payload.Response.results (Bungie GroupsV2)
+    const arr = payload?.Response?.results ?? payload?.results ?? payload?.members ?? null;
     if (!Array.isArray(arr)) return null;
+    return arr;
+  }
 
-    const normalized = arr.map(m => {
-      const member = m?.member ?? m;
-      return {
-        membershipId: String(member?.membershipId ?? member?.id ?? member?.destinyId ?? ''),
-        membershipType: member?.membershipType ?? member?.membership_type ?? 0,
-        displayName: member?.displayName ?? member?.display_name ?? member?.name ?? ''
-      };
-    }).filter(x => x.membershipId);
+  // Map a raw Bungie "result" entry to a minimal member object
+  _mapBungieResultToMember(result) {
+    const destiny = result?.destinyUserInfo ?? {};
+    const bungie = result?.bungieNetUserInfo ?? {};
+    return {
+      membershipId: String(destiny.membershipId ?? bungie.membershipId ?? ''),
+      membershipType: Number(destiny.membershipType ?? bungie.membershipType ?? 0),
+      displayName: destiny.displayName ?? bungie.displayName ?? '',
+      supplementalDisplayName: bungie.supplementalDisplayName ?? '',
+      isOnline: !!result.isOnline,
+      joinDate: result.joinDate ?? null,
+      // raw fields useful to front-end/debugging
+      memberType: result.memberType ?? null,   // numeric memberType from GroupsV2 (preserve; frontend can map to role strings)
+      raw: result
+    };
+  }
 
-    return normalized;
+  // Fetch profile data to extract emblem/background (Profile endpoint). Returns emblemUrl or null.
+  async _fetchEmblemForProfile(membershipType, membershipId) {
+    if (!membershipId) return null;
+    if (!this.env.BUNGIE_API_KEY) return null;
+    const base = 'https://www.bungie.net';
+    const url = `${base}/Platform/Destiny2/${membershipType}/Profile/${encodeURIComponent(membershipId)}/?components=100,200`;
+    const headers = { Accept: 'application/json', 'X-API-Key': this.env.BUNGIE_API_KEY };
+
+    try {
+      const res = await this._fetchWithTimeout(url, { method: 'GET', headers }, Number(this.env.BUNGIE_PER_REQUEST_TIMEOUT_MS || 7000));
+      if (!res || !res.ok) return null;
+      const j = await res.json().catch(() => null);
+      if (!j) return null;
+
+      // Try common places for an emblem/background path
+      const resp = j.Response ?? j;
+      const profileData = resp?.profile ?? resp?.profileData ?? resp;
+      // 1) userInfo.profilePicturePath (profile component)
+      let emblemPath = profileData?.data?.userInfo?.profilePicturePath
+        // 2) profile data's emblemBackgroundPath
+        || profileData?.data?.emblemBackgroundPath
+        // 3) fallback to first character's emblem path (component 200)
+        || (function () {
+          const chars = resp?.characters?.data;
+          if (chars && typeof chars === 'object') {
+            const first = Object.values(chars)[0];
+            return first?.emblemBackgroundPath ?? first?.emblemPath ?? null;
+          }
+          return null;
+        })();
+
+      if (emblemPath) return `${base}${emblemPath}`;
+      return null;
+    } catch (e) {
+      // don't fail hard on individual profile fetches
+      return null;
+    }
+  }
+
+  // Enrich members with emblemUrl (profile fetch). Uses batching to avoid too many concurrent profile calls.
+  async _enrichMembersWithEmblems(membersRaw) {
+    const out = [];
+    if (!Array.isArray(membersRaw)) return out;
+
+    const batchSize = Number(this.env.BUNGIE_PROFILE_BATCH_SIZE || 6); // default concurrency 6
+    for (let i = 0; i < membersRaw.length; i += batchSize) {
+      const chunk = membersRaw.slice(i, i + batchSize);
+      const promises = chunk.map(async (r) => {
+        const mapped = this._mapBungieResultToMember(r);
+        // attempt profile fetch for emblem
+        try {
+          mapped.emblemUrl = await this._fetchEmblemForProfile(mapped.membershipType || 3, mapped.membershipId);
+        } catch (e) {
+          mapped.emblemUrl = null;
+        }
+        return mapped;
+      });
+      // wait for chunk
+      const results = await Promise.all(promises);
+      out.push(...results);
+      // optional small pause between batches to be polite to Bungie (can be configured)
+      const pauseMs = Number(this.env.BUNGIE_PROFILE_BATCH_PAUSE_MS || 250);
+      if (pauseMs > 0 && i + batchSize < membersRaw.length) {
+        await new Promise(res => setTimeout(res, pauseMs));
+      }
+    }
+
+    return out;
   }
 
   // Minimal clears compute stub — reads members and produces a simple aggregation.
-  // Replace perMember logic with real API calls if/when needed.
   async _computeClears(members) {
     const total = Array.isArray(members) ? members.length : 0;
     return { clears: total, prophecyClears: 0, perMember: null };
   }
 
-  // POST /update-members : fetch roster and write KV.members_list
+  // POST /update-members : fetch roster, enrich with emblemUrl (profile), write KV.members_list
   async _handleUpdateMembers() {
     // rate-limit
     const last = (await this.state.storage.get('lastMembersUpdateAt')) || 0;
@@ -82,18 +155,20 @@ export class GlobalStats {
     }
     await this.state.storage.put('lastMembersUpdateAt', now);
 
-    const members = await this._fetchClanRoster();
-    if (!Array.isArray(members)) {
+    const raw = await this._fetchClanRosterRaw();
+    if (!Array.isArray(raw)) {
       await this.state.storage.put('lastMembersFetchErrorAt', new Date().toISOString());
       return { ok: false, reason: 'fetch_failed' };
     }
+
+    // Enrich (profile emblem + mapping) — be mindful of Bungie API rate limits.
+    const members = await this._enrichMembersWithEmblems(raw);
 
     const fetchedAt = new Date().toISOString();
     await this._kvPut('members_list', { fetchedAt, members });
     await this.state.storage.put('lastMembersFetchedAt', fetchedAt);
 
-    // Do NOT touch clears_snapshot here — members update only writes members_list
-    return { ok: true, memberCount: members.length, membersCount: members.length };
+    return { ok: true, memberCount: members.length };
   }
 
   // POST /update-clears : read KV.members_list -> compute clears -> write KV.clears_snapshot
