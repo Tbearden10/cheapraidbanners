@@ -12,34 +12,35 @@ routes = [
 ]
 
 [triggers]
-crons = [
-  "*/5 8-21 * * *",   # every 5 minutes during day -> clears run often
-  "*/30 22-7 * * *"   # every 30 minutes overnight -> clears run less often
-]
+# Cron every 5 minutes (keeps member list fresh and runs conditional dispatch)
+crons = ["*/5 * * * *"]
 
 [[kv_namespaces]]
 binding = "BUNGIE_STATS"
-id = "9143657b87494c198d23b598ceed6cef"
+id = "3ac5034307be43da8c41bba24cb67c87"
 
 [durable_objects]
 bindings = [
-  { name = "GLOBAL_STATS", class_name = "GlobalStats" }
+  { name = "GLOBAL_STATS", class_name = "GlobalStats" },
+  { name = "MEMBER_WORKER", class_name = "MemberWorker" }
 ]
-
-# Create migration for a new SQLite-backed Durable Object class
-[[migrations]]
-tag = "create-globalstats-20251025-v1"
-new_sqlite_classes = ["GlobalStats"]
-
 
 [vars]
 BUNGIE_CLAN_ID = "5335552"
 BUNGIE_CLAN_ROSTER_ENDPOINT = "https://www.bungie.net/Platform/GroupV2/{clanId}/Members/"
 BUNGIE_MEMBER_STATS_ENDPOINT_TEMPLATE = "https://www.bungie.net/platform/Player/{membershipType}/{membershipId}/Profile/"
 
-BUNGIE_FETCH_CONCURRENCY = "10"
-BUNGIE_PER_REQUEST_TIMEOUT_MS = "7000"
+# runtime tuning
+BUNGIE_FETCH_CONCURRENCY = "1"
+BUNGIE_PER_REQUEST_TIMEOUT_MS = "15000"
+BUNGIE_FETCH_RETRIES = "3"
+BUNGIE_FETCH_BACKOFF_MS = "500"
+BUNGIE_ACTIVITY_MAX_PAGES = "2000"
 
-MIN_MEMBERS_UPDATE_INTERVAL_MS = "10800000" # 3 hours for members
-MIN_CLEARS_UPDATE_INTERVAL_MS  = "300000"   # 5 minutes for clears
+# dispatch / KV tuning
+MEMBER_DISPATCH_THROTTLE_MS = "100"
+KV_PER_MEMBER_BATCH_SIZE = "50"
 
+# online/offline intervals (ms)
+ONLINE_CLEARS_INTERVAL_MS = "300000"   # 5 minutes
+OFFLINE_CLEARS_INTERVAL_MS = "7200000" # 2 hours

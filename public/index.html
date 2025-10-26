@@ -1,80 +1,102 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>cheapraidbanners.com [flag]</title>
-  <link rel="stylesheet" href="/styles.css">
+  <meta name="description" content="We have the cheapest raid banners around - 50% off raid banners" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <main class="wrap">
-    <article class="card" id="card" aria-label="Clan overview">
-      <!-- left: banner -->
-      <div class="banner">
-        <img id="clan-banner" src="/assets/banner.png" alt="Clan banner" width="480" height="240" loading="lazy">
-      </div>
+  <!-- Background image (scene) with cookie images falling over it -->
+  <div class="cookie-background" aria-hidden="true">
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+    <div class="cookie"></div>
+  </div>
 
-      <!-- center: site text + stats (always visible) -->
-      <div class="center">
-        <div class="heading">
-          <div class="site">cheapraidbanners.com <span class="callsign">[flag]</span></div>
-          <div class="motto">"50% off raid banners"</div>
-          <div class="about">We have the cheapest raid banners around!</div>
+  <!-- Sticky header with join button -->
+  <header class="sticky-header">
+    <div class="container header-inner">
+      <div class="site-title">cheapraidbanners.com <span class="callsign">[flag]</span></div>
+      <a id="request-cta" class="cta-button" href="https://www.bungie.net/en/ClanV2?groupid=5335552" target="_blank" rel="noopener noreferrer">
+        Request to join
+      </a>
+    </div>
+  </header>
 
-          <!-- action: Request to join -->
-          <div class="actions" aria-hidden="false">
-            <a id="req-join"
-               class="action-btn"
-               href="https://www.bungie.net/en/ClanV2?groupid=5335552"
-               target="_blank"
-               rel="noopener noreferrer"
-               role="button">
-              Request to join
-            </a>
+  <main class="container">
+    <!-- Hero -->
+    <section class="hero scroll-reveal" data-delay="60">
+      <div class="hero-inner">
+        <div class="banner-vertical">
+          <div class="banner">
+            <!-- clan banner image (keeps aspect ratio) -->
+            <img id="clan-banner" src="/assets/banner.png" alt="Clan banner" />
           </div>
         </div>
 
-        <hr class="sep">
-
-        <!-- stats: always shown -->
-        <div id="stats" class="stats" aria-live="polite" aria-hidden="false">
-          <div class="stats-grid">
-            <div class="stat">
-              <div class="label">Members</div>
-              <div id="bungie-members" class="value">—</div>
-            </div>
-            <div class="stat">
-              <div class="label">Prophecy clears</div>
-              <div id="prophecy-clears" class="value">—</div>
-            </div>
-            <div class="stat">
-              <div class="label">Total clears</div>
-              <div id="bungie-clears" class="value">—</div>
-            </div>
-          </div>
-
-          <!-- last updated small and below the grid -->
-          <div class="updated-row">
-            <div class="updated-label">Last updated</div>
-            <div id="bungie-updated" class="updated-value small">never</div>
-          </div>
+        <div class="hero-text">
+          <h1 class="title">cheapraidbanners.com</h1>
+          <p class="motto">"50% off raid banners"</p>
+          <p class="subtitle">Sweet deals, fresh out the oven!</p>
         </div>
       </div>
+    </section>
 
-      <!-- member list column (always present) -->
-      <aside id="member-list" class="member-list" aria-hidden="false">
-        <div class="member-list-header">
-          <div class="member-list-title">Members</div>
+    <!-- About + Stats -->
+    <section class="about-stats">
+      <div class="about scroll-reveal" data-delay="120">
+        <p>
+          We have the cheapest raid banners around. Join the clan for exclusive banners, weekly events, or if you just like cookies!
+        </p>
+      </div>
+
+      <div class="stats-wrap stagger-container" data-delay="180">
+        <div class="stat-card scroll-reveal" data-delay="200">
+          <div class="stat-label">MEMBERS</div>
+          <div class="stat-value" id="members-count">—</div>
         </div>
-        <div id="member-list-inner" class="member-list-inner"></div>
-      </aside>
-    </article>
+
+        <div class="stat-card scroll-reveal" data-delay="260">
+          <div class="stat-label">PROPH CLEARS</div>
+          <div class="stat-value" id="prophecy-count">—</div>
+        </div>
+
+        <div class="stat-card scroll-reveal" data-delay="320">
+          <div class="stat-label">TOTAL DUNGEON CLEARS</div>
+          <div class="stat-value" id="total-count">—</div>
+        </div>
+      </div>
+
+      <div class="stats-footer scroll-reveal" data-delay="380">
+        <span class="updated-label">LAST UPDATED</span>
+        <span class="updated-value" id="last-updated">never</span>
+      </div>
+    </section>
+
+    <!-- Members -->
+    <section class="members-section">
+      <h2 class="section-title scroll-reveal" data-delay="420">MEMBERS</h2>
+
+      <div id="member-list-container" class="members-grid stagger-container" data-delay="480">
+        <!-- JS will populate member cards here -->
+      </div>
+    </section>
   </main>
 
-  <footer class="site-footer" role="contentinfo">
-    <div class="footer-inner">made by belly</div>
-  </footer>
-
-  <script src="/script.js" defer></script>
+  <script src="script.js"></script>
 </body>
 </html>
