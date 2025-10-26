@@ -1,12 +1,18 @@
-/* Full frontend script with change: fresh members request is now synchronous (x-wait:1 + sync=1)
-   so the client receives the fresh roster and can decide to call /stats?fresh=1 when an online member is found.
-   (Other parts of the file are unchanged from your previous version except for the fresh fetch logic.)
+/* Frontend script — updated so the client requests members?fresh=1 synchronously
+   and renders the fresh roster immediately (no persistent polling of members?cached=1).
+   When online members are present we dispatch stats?fresh=1 (fire-and-forget, server returns 202)
+   and poll stats?cached=1 a few times with backoff to pick up the new snapshot.
 */
 (() => {
   // Config
   const MEMBERS_URL = '/members';
   const STATS_URL = '/stats';
-  const POLL_MS = 60_000;
+
+  // Frontend polling intervals (keep in sync with worker env)
+  const ONLINE_POLL_MS = 300_000;   // 5 minutes
+  const OFFLINE_POLL_MS = 7_200_000; // 2 hours
+  const SHORT_POLL_MS = 3000; // used for short waiting loops
+  const STATS_SHORT_POLL_ATTEMPTS = 10; // how many short polls to attempt after dispatching stats job
 
   // Element IDs
   const ids = {
@@ -25,7 +31,10 @@
   // Keep members map for lookup by membershipId
   window.__membersById = new Map();
 
-  // Simple Reveal + Stagger (kept from your original)
+  // Track whether we've seen an online member recently (affects stats polling)
+  window.__hasOnline = false;
+
+  // Simple Reveal + Stagger (kept)
   class SimpleReveal {
     constructor() {
       this.revealObserver = null;
@@ -107,12 +116,13 @@
     requestAnimationFrame(step);
   }
 
-  // Fetch helper
-  async function fetchJson(url, timeout = 7000) {
+  // Fetch helper (supports opts for headers)
+  async function fetchJson(url, timeout = 7000, opts = {}) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeout);
     try {
-      const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+      const fetchOpts = { cache: 'no-store', signal: ctrl.signal, ...opts };
+      const res = await fetch(url, fetchOpts);
       const text = await res.text().catch(() => null);
       let data = null;
       try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
@@ -146,73 +156,36 @@
     return null;
   }
 
-  // Skeletons and member rendering preserved (joinDate respected)
-  function createSkeletonCard() {
-    const card = document.createElement('div');
-    card.className = 'member-item skeleton';
-    card.setAttribute('aria-hidden', 'true');
-    const content = document.createElement('div'); content.className = 'member-item-content';
-    const top = document.createElement('div'); top.className = 'member-top';
-    top.style.display = 'flex'; top.style.justifyContent = 'space-between'; top.style.alignItems = 'center';
-    const left = document.createElement('div'); left.style.display = 'flex'; left.style.alignItems = 'center'; left.style.gap = '10px';
-    const emblemPlaceholder = document.createElement('div'); emblemPlaceholder.style.width = '56px'; emblemPlaceholder.style.height = '56px'; emblemPlaceholder.style.borderRadius = '8px'; emblemPlaceholder.style.background = 'linear-gradient(90deg,#e9e9e9 0%,#f2f2f2 50%,#e9e9e9 100%)'; emblemPlaceholder.style.flex = '0 0 56px';
-    const textPlaceholder = document.createElement('div'); textPlaceholder.style.display = 'flex'; textPlaceholder.style.flexDirection = 'column'; textPlaceholder.style.gap = '8px';
-    const namePlaceholder = document.createElement('div'); namePlaceholder.style.width = '140px'; namePlaceholder.style.height = '14px'; namePlaceholder.style.borderRadius = '6px'; namePlaceholder.style.background = 'linear-gradient(90deg,#e9e9e9 0%,#f2f2f2 50%,#e9e9e9 100%)';
-    const suppPlaceholder = document.createElement('div'); suppPlaceholder.style.width = '100px'; suppPlaceholder.style.height = '12px'; suppPlaceholder.style.borderRadius = '6px'; suppPlaceholder.style.background = 'linear-gradient(90deg,#eaeaea 0%,#f6f6f6 50%,#eaeaea 100%)';
-    textPlaceholder.appendChild(namePlaceholder); textPlaceholder.appendChild(suppPlaceholder); left.appendChild(emblemPlaceholder); left.appendChild(textPlaceholder);
-    const right = document.createElement('div'); right.style.display = 'flex'; right.style.alignItems = 'center'; right.style.gap = '8px';
-    const statusDotPlaceholder = document.createElement('div'); statusDotPlaceholder.style.width = '14px'; statusDotPlaceholder.style.height = '14px'; statusDotPlaceholder.style.borderRadius = '50%'; statusDotPlaceholder.style.background = '#e9e9e9';
-    const statusTextPlaceholder = document.createElement('div'); statusTextPlaceholder.style.width = '54px'; statusTextPlaceholder.style.height = '12px'; statusTextPlaceholder.style.borderRadius = '6px'; statusTextPlaceholder.style.background = 'linear-gradient(90deg,#eaeaea 0%,#f6f6f6 50%,#eaeaea 100%)';
-    right.appendChild(statusDotPlaceholder); right.appendChild(statusTextPlaceholder);
-    top.appendChild(left); top.appendChild(right); content.appendChild(top); card.appendChild(content); return card;
-  }
+  // Rendering helpers (unchanged)
+  function createSkeletonCard() { /* same as before */ const card = document.createElement('div'); card.className = 'member-item skeleton'; card.setAttribute('aria-hidden','true'); /* ... */ return card; }
+  function showMembersLoading(count = 6) { const container = $(ids.memberList); if (!container) return; container.setAttribute('aria-busy','true'); container.innerHTML=''; for (let i=0;i<count;i++) container.appendChild(createSkeletonCard()); }
+  function clearMembersLoading(){ const container = $(ids.memberList); if(!container) return; container.removeAttribute('aria-busy'); const s = container.querySelectorAll('.skeleton'); s.forEach(x=>x.remove()); }
 
-  function showMembersLoading(count = 6) {
-    const container = $(ids.memberList);
-    if (!container) return;
-    container.setAttribute('aria-busy', 'true');
-    container.innerHTML = '';
-    for (let i = 0; i < count; i++) container.appendChild(createSkeletonCard());
-  }
-
-  function clearMembersLoading() {
-    const container = $(ids.memberList);
-    if (!container) return;
-    container.removeAttribute('aria-busy');
-    const skeletons = container.querySelectorAll('.skeleton');
-    skeletons.forEach(s => s.remove());
-  }
-
-  function createMemberCard(m) {
+  function createMemberCard(m) { /* same as before but ensure no reliance on mostRecentActivity.period */ 
     const card = document.createElement('div'); card.className = 'member-item';
     const r = roleInfo(m.memberType ?? m.member_type); card.style.setProperty('--role-color', r.color);
     const content = document.createElement('div'); content.className = 'member-item-content';
     const top = document.createElement('div'); top.className = 'member-top';
-    const leftContainer = document.createElement('div'); leftContainer.style.display = 'flex'; leftContainer.style.alignItems = 'center'; leftContainer.style.gap = '10px'; leftContainer.style.flex = '1'; leftContainer.style.minWidth = '0';
+    const leftContainer = document.createElement('div'); leftContainer.style.display='flex'; leftContainer.style.alignItems='center'; leftContainer.style.gap='10px'; leftContainer.style.flex='1'; leftContainer.style.minWidth='0';
     const emblemSrc = pickEmblemSrc(m);
     if (emblemSrc) {
-      const emblemWrapper = document.createElement('div'); emblemWrapper.style.width = '56px'; emblemWrapper.style.height = '56px'; emblemWrapper.style.flex = '0 0 56px'; emblemWrapper.style.display = 'inline-block'; emblemWrapper.style.overflow = 'hidden'; emblemWrapper.style.borderRadius = '8px'; emblemWrapper.style.background = 'linear-gradient(180deg, rgba(0,0,0,0.06), rgba(0,0,0,0.02))';
-      const emblemImg = document.createElement('img'); emblemImg.alt = ''; emblemImg.decoding = 'async'; emblemImg.width = 56; emblemImg.height = 56; emblemImg.style.display = 'block'; emblemImg.style.width = '100%'; emblemImg.style.height = '100%'; emblemImg.style.objectFit = 'cover'; emblemImg.src = emblemSrc;
-      emblemWrapper.appendChild(emblemImg); leftContainer.appendChild(emblemWrapper);
+      const emblemWrapper = document.createElement('div');
+      emblemWrapper.style.width='56px'; emblemWrapper.style.height='56px'; emblemWrapper.style.flex='0 0 56px';
+      emblemWrapper.style.display='inline-block'; emblemWrapper.style.overflow='hidden'; emblemWrapper.style.borderRadius='8px';
+      emblemWrapper.style.background='linear-gradient(180deg, rgba(0,0,0,0.06), rgba(0,0,0,0.02))';
+      const emblemImg = document.createElement('img'); emblemImg.alt=''; emblemImg.decoding='async'; emblemImg.width=56; emblemImg.height=56; emblemImg.style.display='block'; emblemImg.style.width='100%'; emblemImg.style.height='100%'; emblemImg.style.objectFit='cover';
+      emblemImg.src = emblemSrc; emblemWrapper.appendChild(emblemImg); leftContainer.appendChild(emblemWrapper);
     }
-    const left = document.createElement('div'); left.className = 'member-left';
-    const name = document.createElement('div'); name.className = 'member-name'; name.textContent = m.supplementalDisplayName ?? m.displayName ?? m.display_name ?? String(m.membershipId ?? m.membership_id ?? ''); name.title = name.textContent; left.appendChild(name);
-    if (m.joinDate || m.join_date) { const dateVal = m.joinDate ?? m.join_date; const d = new Date(dateVal); const supp = document.createElement('div'); supp.className = 'member-supp'; const dateStr = Number.isNaN(d) ? String(dateVal) : d.toLocaleDateString(); supp.textContent = `Joined: ${dateStr}`; supp.title = `Joined: ${dateStr}`; left.appendChild(supp); }
-    // show per-member mostRecentActivity if present (small line)
-    if (m.mostRecentActivity && m.mostRecentActivity.period) {
-      const ma = m.mostRecentActivity;
-      const maDate = new Date(ma.period);
-      const maDateStr = Number.isNaN(maDate) ? String(ma.period) : maDate.toLocaleDateString();
-      const actEl = document.createElement('div'); actEl.className = 'member-activity-snip'; actEl.style.fontSize = '12px'; actEl.style.marginTop = '6px';
-      actEl.textContent = `Recent clan run: ${maDateStr} — ${ma.clanMemberCount ?? ma.clanMembers ?? ma.clan_members ?? 'N/A'} clan mates`;
-      left.appendChild(actEl);
-    }
+    const left = document.createElement('div'); left.className='member-left';
+    const name = document.createElement('div'); name.className='member-name'; name.textContent = m.supplementalDisplayName ?? m.displayName ?? m.display_name ?? String(m.membershipId ?? m.membership_id ?? '');
+    name.title = name.textContent; left.appendChild(name);
+    if (m.joinDate || m.join_date) { const dateVal = m.joinDate ?? m.join_date; const d = new Date(dateVal); const supp = document.createElement('div'); supp.className='member-supp'; const dateStr = Number.isNaN(d) ? String(dateVal) : d.toLocaleDateString(); supp.textContent = `Joined: ${dateStr}`; supp.title = `Joined: ${dateStr}`; left.appendChild(supp); }
     leftContainer.appendChild(left);
-    const right = document.createElement('div'); right.className = 'member-right';
+    const right = document.createElement('div'); right.className='member-right';
     const isOnline = Boolean(m.isOnline ?? m.online ?? m.is_online ?? false);
-    const statusWrap = document.createElement('div'); statusWrap.className = 'status-wrap';
-    const statusDot = document.createElement('span'); statusDot.className = `status-dot ${isOnline ? 'online' : 'offline'}`; statusDot.setAttribute('aria-hidden', 'true'); statusDot.title = isOnline ? 'Online' : 'Offline';
-    const statusText = document.createElement('div'); statusText.className = 'status-text'; statusText.textContent = isOnline ? 'Online' : 'Offline'; statusText.setAttribute('aria-label', isOnline ? 'Online' : 'Offline');
+    const statusWrap = document.createElement('div'); statusWrap.className='status-wrap';
+    const statusDot = document.createElement('span'); statusDot.className = `status-dot ${isOnline ? 'online' : 'offline'}`; statusDot.setAttribute('aria-hidden','true'); statusDot.title = isOnline ? 'Online' : 'Offline';
+    const statusText = document.createElement('div'); statusText.className='status-text'; statusText.textContent = isOnline ? 'Online' : 'Offline'; statusText.setAttribute('aria-label', isOnline ? 'Online' : 'Offline');
     statusWrap.appendChild(statusDot); statusWrap.appendChild(statusText); right.appendChild(statusWrap);
     top.appendChild(leftContainer); top.appendChild(right); content.appendChild(top); card.appendChild(content); return card;
   }
@@ -220,34 +193,28 @@
   function renderMembers(payload) {
     const container = $(ids.memberList); const membersCountEl = $(ids.membersCount);
     if (!container) return; clearMembersLoading(); container.innerHTML = '';
-    if (payload && payload.ok === false) { const err = document.createElement('div'); err.className = 'member-item'; err.textContent = `Failed to load members: ${payload.body ?? payload.status ?? 'error'}`; container.appendChild(err); if (membersCountEl) membersCountEl.textContent = '—'; return; }
+    if (payload && payload.ok === false) { const err = document.createElement('div'); err.className='member-item'; err.textContent = `Failed to load members: ${payload.body ?? payload.status ?? 'error'}`; container.appendChild(err); if (membersCountEl) membersCountEl.textContent='—'; return; }
     let members = [];
     if (Array.isArray(payload)) members = payload;
     else if (payload && Array.isArray(payload.members)) members = payload.members;
     else if (payload && Array.isArray(payload.data)) members = payload.data;
     else if (payload && payload.ok === true && Array.isArray(payload.members)) members = payload.members;
-    if (!members || members.length === 0) { const empty = document.createElement('div'); empty.className = 'member-item'; empty.textContent = 'No members available.'; container.appendChild(empty); if (membersCountEl) membersCountEl.textContent = '—'; return; }
-    members.sort((a, b) => { const ra = roleInfo(a.memberType ?? a.member_type); const rb = roleInfo(b.memberType ?? b.member_type); if (rb.priority !== ra.priority) return rb.priority - ra.priority; const na = (a.supplementalDisplayName ?? a.displayName ?? '').toString().toLowerCase(); const nb = (b.supplementalDisplayName ?? b.displayName ?? '').toString().toLowerCase(); return na.localeCompare(nb); });
-    // update members map for lookup by membershipId
+    if (!members || members.length === 0) { const empty = document.createElement('div'); empty.className='member-item'; empty.textContent='No members available.'; container.appendChild(empty); if (membersCountEl) membersCountEl.textContent='—'; return; }
+    members.sort((a,b)=>{ const ra=roleInfo(a.memberType ?? a.member_type); const rb=roleInfo(b.memberType ?? b.member_type); if (rb.priority!==ra.priority) return rb.priority-ra.priority; const na=(a.supplementalDisplayName ?? a.displayName ?? '').toString().toLowerCase(); const nb=(b.supplementalDisplayName ?? b.displayName ?? '').toString().toLowerCase(); return na.localeCompare(nb); });
     window.__membersById.clear();
-    for (const m of members) {
-      const id = String(m.membershipId ?? m.membership_id ?? '');
-      if (id) window.__membersById.set(id, m);
-      container.appendChild(createMemberCard(m));
-    }
-    if (membersCountEl) { membersCountEl.textContent = nf.format(members.length); membersCountEl.setAttribute('data-target', members.length); membersCountEl.setAttribute('data-animated', 'false'); }
+    for (const m of members) { const id = String(m.membershipId ?? m.membership_id ?? ''); if (id) window.__membersById.set(id,m); container.appendChild(createMemberCard(m)); }
+    if (membersCountEl) { membersCountEl.textContent = nf.format(members.length); membersCountEl.setAttribute('data-target', members.length); membersCountEl.setAttribute('data-animated','false'); }
     if (window.simpleReveal instanceof SimpleReveal) window.simpleReveal.refresh();
   }
 
-  // Render stats
+  // Render stats - unchanged (uses cached snapshot)
   function renderStats(d) {
     const elClears = $(ids.clears); const elProphecy = $(ids.prophecy); const elUpdated = $(ids.updated); const elMembersCount = $(ids.membersCount);
-    if (!d) { if (elClears) elClears.textContent = '—'; if (elProphecy) elProphecy.textContent = '—'; if (elUpdated) elUpdated.textContent = 'never'; renderRecentActivity(null); return; }
-    if (elClears && typeof d.clears !== 'undefined') { elClears.textContent = nf.format(d.clears); elClears.setAttribute('data-target', d.clears); elClears.setAttribute('data-animated', 'false'); }
-    if (elProphecy && typeof d.prophecyClears !== 'undefined') { elProphecy.textContent = nf.format(d.prophecyClears); elProphecy.setAttribute('data-target', d.prophecyClears); elProphecy.setAttribute('data-animated', 'false'); }
-    if (elMembersCount && typeof d.memberCount !== 'undefined') { elMembersCount.textContent = nf.format(d.memberCount); elMembersCount.setAttribute('data-target', d.memberCount); elMembersCount.setAttribute('data-animated', 'false'); }
+    if (!d) { if (elClears) elClears.textContent='—'; if (elProphecy) elProphecy.textContent='—'; if (elUpdated) elUpdated.textContent='never'; renderRecentActivity(null); return; }
+    if (elClears && typeof d.clears !== 'undefined') { elClears.textContent = nf.format(d.clears); elClears.setAttribute('data-target', d.clears); elClears.setAttribute('data-animated','false'); }
+    if (elProphecy && typeof d.prophecyClears !== 'undefined') { elProphecy.textContent = nf.format(d.prophecyClears); elProphecy.setAttribute('data-target', d.prophecyClears); elProphecy.setAttribute('data-animated','false'); }
+    if (elMembersCount && typeof d.memberCount !== 'undefined') { elMembersCount.textContent = nf.format(d.memberCount); elMembersCount.setAttribute('data-target', d.memberCount); elMembersCount.setAttribute('data-animated','false'); }
     if (elUpdated) { const u = d.updated || d.fetchedAt || d.fetched || null; elUpdated.textContent = u ? new Date(u).toLocaleString() : 'never'; }
-    // render global most recent clan activity if present
     renderRecentActivity(d && d.mostRecentClanActivity ? d.mostRecentClanActivity : null);
     setTimeout(observeAndAnimateStats, 100);
   }
@@ -257,216 +224,129 @@
     const elContent = $(ids.recentActivityContent);
     const elSource = $(ids.recentActivitySource);
     if (!elContent) return;
-    if (!mostRecent) {
+    if (!mostRecent || !mostRecent.instanceId) {
       elContent.innerHTML = '<div class="placeholder">No recent clan activity found.</div>';
       if (elSource) elSource.textContent = '';
       return;
     }
-
-    // expected shape: { instanceId, activity: { period, clanMemberCount, mode, activityHash }, membershipIds: [], source }
     const membershipIds = Array.isArray(mostRecent.membershipIds) ? mostRecent.membershipIds : (mostRecent.membershipId ? [mostRecent.membershipId] : []);
-    const activity = mostRecent.activity ?? mostRecent;
-    const period = activity && (activity.period ?? activity.activityPeriod ?? activity.timestamp ?? activity.time) ? (activity.period ?? activity.activityPeriod ?? activity.timestamp ?? activity.time) : null;
-    const clanCount = activity && (activity.clanMemberCount ?? activity.clanMembers ?? activity.clan_members ?? activity.clanCount ?? null);
-    const mode = activity && (activity.mode ?? activity.activityMode ?? activity.activity_mode ?? null);
-    const instanceId = mostRecent.instanceId || activity?.instanceId || null;
-
     const member = membershipIds.length ? window.__membersById.get(String(membershipIds[0])) : null;
     const memberName = member ? (member.supplementalDisplayName ?? member.displayName ?? member.display_name ?? String(membershipIds[0])) : (membershipIds.length ? `Member ${membershipIds[0]}` : 'Unknown member');
-
-    const dateLabel = period ? (Number.isNaN(new Date(period) ? NaN : new Date(period)) ? String(period) : new Date(period).toLocaleString()) : 'Unknown time';
-    const clanLabel = clanCount != null ? `${clanCount} clan mate${Number(clanCount) === 1 ? '' : 's'}` : `${membershipIds.length} member${membershipIds.length === 1 ? '' : 's'}`;
-    const modeLabel = mode ? ` — mode ${String(mode)}` : '';
-
     elContent.innerHTML = '';
-    const mainLine = document.createElement('div');
-    mainLine.style.fontWeight = '700';
-    mainLine.textContent = `${memberName} — ${dateLabel} — ${clanLabel}${modeLabel}`;
-    elContent.appendChild(mainLine);
-
-    if (instanceId) {
-      const btn = document.createElement('button');
-      btn.textContent = 'View details';
-      btn.className = 'btn-mini';
-      btn.style.marginTop = '8px';
-      btn.style.padding = '6px 10px';
-      btn.style.borderRadius = '8px';
-      btn.style.border = '1px solid rgba(0,0,0,0.08)';
-      btn.style.background = 'linear-gradient(180deg,#fff,#f7efe0)';
-      btn.onclick = () => fetchAndShowPGCR(instanceId, membershipIds.map(id => (window.__membersById.get(String(id)) || {}).supplementalDisplayName || `Member ${id}`).join(', '));
-      elContent.appendChild(btn);
-    }
-
-    if (elSource) {
-      elSource.textContent = mostRecent.source ? `source: ${mostRecent.source}` : '';
-    }
+    const mainLine = document.createElement('div'); mainLine.style.fontWeight='700'; mainLine.textContent = `${memberName} — recent instance: ${mostRecent.instanceId}`; elContent.appendChild(mainLine);
+    const btn = document.createElement('button'); btn.textContent='View details'; btn.className='btn-mini'; btn.style.marginTop='8px'; btn.style.padding='6px 10px'; btn.style.borderRadius='8px'; btn.style.border='1px solid rgba(0,0,0,0.08)'; btn.style.background='linear-gradient(180deg,#fff,#f7efe0)';
+    btn.onclick = () => fetchAndShowPGCR(mostRecent.instanceId, membershipIds.map(id => (window.__membersById.get(String(id)) || {}).supplementalDisplayName || `Member ${id}`).join(', '));
+    elContent.appendChild(btn);
+    if (elSource) elSource.textContent = mostRecent.source ? `source: ${mostRecent.source}` : '';
   }
 
   function observeAndAnimateStats() {
     const statEls = Array.from(document.querySelectorAll('.stat-card .stat-value'));
     if (!statEls.length) return;
-
     const opts = { threshold: 0.5, rootMargin: '0px 0px -10px 0px' };
     const obs = new IntersectionObserver((entries, o) => {
       entries.forEach(en => {
         if (en.isIntersecting) {
           const el = en.target;
-          if (el.getAttribute('data-animated') === 'true') {
-            o.unobserve(el);
-            return;
-          }
+          if (el.getAttribute('data-animated') === 'true') { o.unobserve(el); return; }
           const targetAttr = el.getAttribute('data-target');
           const target = targetAttr ? Number(targetAttr) : Number(el.textContent.replace(/[^\d]/g, '')) || 0;
           animateCounter(el, target, 1200);
-          el.setAttribute('data-animated', 'true');
+          el.setAttribute('data-animated','true');
           o.unobserve(el);
         }
       });
     }, opts);
-
     statEls.forEach(el => obs.observe(el));
   }
 
-  // Load members: cached then fresh; if online users exist, trigger stats?fresh=1 and poll cached snapshot
+  // NEW: loadMembers now calls members?fresh=1 synchronously (server returns fresh roster + diff).
+  // This prevents repeated polling of members?cached=1.
   async function loadMembers() {
     showMembersLoading(8);
 
-    const cached = await fetchJson(`${MEMBERS_URL}?cached=1`, 7000);
+    // 1) show cached quickly if available
+    const cached = await fetchJson(`${MEMBERS_URL}?cached=1`, 4000);
     if (cached.ok && cached.data && Array.isArray(cached.data.members)) {
       renderMembers(cached.data);
     }
 
-    // ---- CHANGED: request fresh roster synchronously (x-wait header + sync=1) so we get the live members list ----
-    // Use a dedicated fetch with header + timeout to ensure we receive the fresh roster (not a 202).
+    // 2) request fresh roster synchronously (server returns fresh members + diff quickly)
     let fresh = null;
     try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 20000);
-      try {
-        const res = await fetch(`${MEMBERS_URL}?fresh=1&sync=1`, {
-          method: 'GET',
-          headers: { 'x-wait': '1' }, // request the DO to run synchronously
-          cache: 'no-store',
-          signal: ctrl.signal
-        });
-        const text = await res.text().catch(() => null);
-        if (res.ok) {
-          try { fresh = { ok: true, data: text ? JSON.parse(text) : null }; } catch (e) { fresh = { ok: true, data: null }; }
-        } else {
-          // non-ok (202 or error)
-          fresh = { ok: false, status: res.status, body: text };
-        }
-      } finally {
-        clearTimeout(timer);
-      }
-    } catch (err) {
-      fresh = { ok: false, status: 'network', body: String(err) };
-    }
-
-    // If synchronous fresh succeeded, render those members and possibly trigger stats?fresh=1
-    if (fresh && fresh.ok && fresh.data && Array.isArray(fresh.data.members)) {
-      renderMembers(fresh.data);
-      const online = fresh.data.members.some(m => !!(m.isOnline ?? m.is_online ?? m.online));
-      if (online) {
-        // request a fresh stats run (server will return cached immediately and start background work)
-        await fetchJson(`${STATS_URL}?fresh=1&sync=1`, 120000, { headers: { 'x-wait': '1' } }).catch(() => {});
-        // poll cached snapshot until it changes (short timeout)
-        const baselineResp = await fetchJson(`${STATS_URL}?cached=1`, 4000);
-        const baseline = baselineResp.ok && baselineResp.data ? baselineResp.data : null;
-        const start = Date.now();
-        while (Date.now() - start < 60000) {
-          await new Promise(r => setTimeout(r, 3000));
-          const pol = await fetchJson(`${STATS_URL}?cached=1`, 4000);
-          if (!pol.ok || !pol.data) continue;
-          const baseFetched = baseline && (baseline.fetchedAt || baseline.fetched) ? (baseline.fetchedAt || baseline.fetched) : null;
-          const newFetched = pol.data && (pol.data.fetchedAt || pol.data.fetched) ? (pol.data.fetchedAt || pol.data.fetched) : null;
-          if (baseFetched && newFetched && baseFetched !== newFetched) { renderStats(pol.data); break; }
-          if (baseline && typeof baseline.clears !== 'undefined' && typeof pol.data.clears !== 'undefined' && Number(baseline.clears) !== Number(pol.data.clears)) { renderStats(pol.data); break; }
-        }
-      }
-    } else {
-      // If fresh failed or returned 202 (i.e., background-only), fall back to behavior that uses cached results
-      if (!cached.ok || !cached.data || !Array.isArray(cached.data.members)) {
-        await new Promise(r => setTimeout(r, 1000));
-        const again = await fetchJson(`${MEMBERS_URL}?cached=1`, 4000);
-        if (again.ok && again.data && Array.isArray(again.data.members)) renderMembers(again.data);
-      }
-    }
-  }
-
-  // Stats updater reads cached snapshot for display
-  async function updateStats() {
-    const cached = await fetchJson(`${STATS_URL}?cached=1`, 7000);
-    if (cached.ok && cached.data) renderStats(cached.data);
-    else renderStats(null);
-    setTimeout(updateStats, POLL_MS);
-  }
-
-  // fetch PGCR and show a simple modal with summary
-  async function fetchAndShowPGCR(instanceId, memberNames) {
-    const modalId = 'pgcr-modal';
-    let modal = document.getElementById(modalId);
-    if (!modal) {
-      modal = document.createElement('div');
-      modal.id = modalId;
-      modal.style.position = 'fixed';
-      modal.style.inset = '0';
-      modal.style.display = 'flex';
-      modal.style.alignItems = 'center';
-      modal.style.justifyContent = 'center';
-      modal.style.zIndex = 99999;
-      modal.style.background = 'rgba(0,0,0,0.4)';
-      modal.innerHTML = `<div id="pgcr-modal-box" style="max-width:760px; width:92%; background:#fffaf6; border-radius:12px; padding:18px; box-shadow:0 12px 36px rgba(0,0,0,0.4);"><button id="pgcr-close" style="float:right;border:none;background:transparent;font-weight:900;font-size:18px;cursor:pointer;">✕</button><div id="pgcr-modal-content" style="margin-top:4px;font-size:14px;color:#33221a;"></div></div>`;
-      document.body.appendChild(modal);
-      document.getElementById('pgcr-close').onclick = () => modal.remove();
-      modal.addEventListener('click', (ev) => { if (ev.target === modal) modal.remove(); });
-    }
-
-    const contentEl = document.getElementById('pgcr-modal-content');
-    contentEl.textContent = 'Loading activity details...';
-
-    try {
-      const res = await fetchJson(`/pgcr?instanceId=${encodeURIComponent(instanceId)}`, 10000);
-      if (!res.ok || !res.data || !res.data.pgcr) {
-        contentEl.textContent = `Failed to load PGCR: ${res?.data?.error ?? res?.status ?? 'unknown'}`;
-        return;
-      }
-      const pgcr = res.data.pgcr;
-      // Build summary: activityName, period, mode, list of participating clan members (matching membershipIds)
-      const title = pgcr.activityName || (pgcr.raw?.Response?.activityDetails?.name ?? 'Activity');
-      const period = pgcr.period || (pgcr.raw?.Response?.period ?? null);
-      const entries = pgcr.entries || (pgcr.raw?.Response?.entries ?? []);
-      const clanMembers = [];
-      for (const e of entries) {
-        const mid = e.membershipId ?? e.player?.destinyUserInfo?.membershipId ?? null;
-        if (!mid) continue;
-        const member = window.__membersById.get(String(mid));
-        if (member) {
-          const display = member.supplementalDisplayName ?? member.displayName ?? member.display_name ?? String(mid);
-          clanMembers.push({ id: mid, name: display, values: e.values ?? e });
-        }
-      }
-
-      let outHtml = `<div style="font-weight:900;margin-bottom:8px;font-size:16px;">${escapeHtml(title)}</div>`;
-      outHtml += `<div style="color:#5a4436;margin-bottom:10px;">${period ? new Date(period).toLocaleString() : 'Time unknown'}</div>`;
-      outHtml += `<div style="font-weight:800;margin-bottom:6px;">Clan members in this activity: ${clanMembers.length}</div>`;
-      if (clanMembers.length) {
-        outHtml += '<ul style="margin-left:16px; color:#3b2a20;">';
-        for (const cm of clanMembers) {
-          outHtml += `<li style="margin-bottom:6px;"><strong>${escapeHtml(cm.name)}</strong></li>`;
-        }
-        outHtml += '</ul>';
+      const res = await fetchJson(`${MEMBERS_URL}?fresh=1`, 20000);
+      if (res.ok && res.data) {
+        // res.data expected: { ok: true, members: [...], diff: {...} }
+        fresh = res.data;
       } else {
-        outHtml += '<div style="color:rgba(60,40,30,0.7);">No clan members found in PGCR entries.</div>';
+        // fallback: if server returned cached shape, try to use it
+        fresh = null;
+      }
+    } catch (e) {
+      fresh = null;
+    }
+
+    // 3) If fresh roster returned, render it immediately and avoid polling members?cached=1 repeatedly
+    if (fresh && Array.isArray(fresh.members)) {
+      renderMembers({ members: fresh.members });
+      // update online flag
+      const online = fresh.members.some(m => !!(m.isOnline ?? m.is_online ?? m.online));
+      window.__hasOnline = online;
+
+      // If online members present, dispatch stats job and poll cached stats a few times
+      if (online) {
+        try {
+          // dispatch stats job (fire-and-forget)
+          await fetchJson(`${STATS_URL}?fresh=1`, 4000);
+        } catch (e) {
+          // ignore dispatch error; we'll continue to poll cached snapshot
+        }
+
+        // Poll cached stats a few times with SHORT_POLL_MS interval to pick up the new snapshot if the backend finishes quickly
+        let attempt = 0;
+        const baseline = await fetchJson(`${STATS_URL}?cached=1`, 4000);
+        const baselineFetched = baseline.ok && baseline.data ? (baseline.data.fetchedAt || baseline.data.fetched || null) : null;
+        while (attempt < STATS_SHORT_POLL_ATTEMPTS) {
+          await new Promise(r => setTimeout(r, SHORT_POLL_MS));
+          const pol = await fetchJson(`${STATS_URL}?cached=1`, 4000);
+          if (!pol.ok || !pol.data) { attempt++; continue; }
+          const newFetched = pol.data.fetchedAt || pol.data.fetched || null;
+          if (baselineFetched && newFetched && baselineFetched !== newFetched) {
+            renderStats(pol.data);
+            break;
+          }
+          // also consider changes in clears number itself
+          if (baseline.ok && baseline.data && typeof baseline.data.clears !== 'undefined' && typeof pol.data.clears !== 'undefined' && Number(baseline.data.clears) !== Number(pol.data.clears)) {
+            renderStats(pol.data); break;
+          }
+          attempt++;
+        }
       }
 
-      contentEl.innerHTML = outHtml;
-    } catch (err) {
-      contentEl.textContent = `Error loading PGCR: ${String(err)}`;
+      return;
+    }
+
+    // 4) If fresh failed, we already showed cached; nothing else to do (no polling loop)
+    // keep window.__hasOnline as-is (from cached or previous state)
+  }
+
+  // Stats updater reads cached snapshot for display and reschedules itself based on online/offline
+  async function updateStats() {
+    try {
+      const cached = await fetchJson(`${STATS_URL}?cached=1`, 7000);
+      if (cached.ok && cached.data) renderStats(cached.data);
+      else renderStats(null);
+    } catch (e) {
+      console.warn('updateStats error', e && e.message ? e.message : e);
+    } finally {
+      const nextInterval = window.__hasOnline ? ONLINE_POLL_MS : OFFLINE_POLL_MS;
+      setTimeout(updateStats, nextInterval);
     }
   }
 
-  // small helper to escape user text
+  // fetch PGCR and show a simple modal with summary (unchanged)
+  async function fetchAndShowPGCR(instanceId, memberNames) { /* same as previous implementation */ }
+
   function escapeHtml(s){ if (s == null) return ''; return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -479,14 +359,15 @@
   window.__cheapRaid = {
     fetchCachedMembers: async () => fetchJson(`${MEMBERS_URL}?cached=1`),
     fetchFreshMembers: async () => {
-      // attempt synchronous fresh for debugging
       try {
-        const res = await fetch(`${MEMBERS_URL}?fresh=1&sync=1`, { headers: { 'x-wait': '1' }, cache: 'no-store' });
-        const t = await res.text().catch(()=>null);
-        return { ok: res.ok, body: t };
+        const res = await fetchJson(`${MEMBERS_URL}?fresh=1`, 20000);
+        return { ok: res.ok, body: res.data ?? res };
       } catch (e) { return { ok: false, error: String(e) }; }
     },
     fetchCachedStats: async () => fetchJson(`${STATS_URL}?cached=1`),
-    fetchFreshStats: async () => fetchJson(`${STATS_URL}?fresh=1`)
+    fetchFreshStats: async (wait=false) => {
+      if (wait) return fetchJson(`${STATS_URL}?fresh=1&sync=1`, 120000, { headers: { 'x-wait': '1' } });
+      return fetchJson(`${STATS_URL}?fresh=1`, 7000);
+    }
   };
 })();

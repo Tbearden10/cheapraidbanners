@@ -1,8 +1,5 @@
 // Durable Object: MemberWorker
-// - Accepts per-character jobs (membershipId + characterId) to compute clears for a single character.
-// - Writes character-level KV keys character_clears:{membershipId}:{characterId}.
-// - Still supports the older per-member compute if called without characterId (backwards-compatible).
-
+// Writes compressed mostRecentActivity to KV as { instanceId } only (if available).
 import { computePerMemberHistory } from './lib/activityHistory.js';
 import { fetchAggregateActivityStats, computeClearsForMember, computeClearsForCharacter } from './lib/bungieApi.js';
 
@@ -106,7 +103,6 @@ export class MemberWorker {
       return;
     }
 
-    // simple lock/guard against concurrent runners
     if (job.lockedAt && (Date.now() - new Date(job.lockedAt).getTime()) < 1000 * 60 * 10) {
       console.log('[MemberWorker] jobRun: already locked recently for', job.membershipId, job.characterId || '');
       return;
@@ -124,16 +120,21 @@ export class MemberWorker {
       const characterId = job.characterId || null;
       const opts = job.opts || {};
 
-      // If characterId present -> run per-character compute and write character-level KV
       if (characterId) {
         const maxRunMs = Number(this.env.MEMBER_MAX_RUN_MS || opts.maxRunMs || 5000);
         try {
           const result = await computeClearsForCharacter(membershipType, membershipId, characterId, this.env, { ...opts, maxPages: opts.maxPages, pageSize: opts.pageSize, timeoutMs: opts.timeoutMs, retries: opts.retries, backoffBaseMs: opts.backoffBaseMs });
           const kvKey = `character_clears:${membershipId}:${characterId}`;
+          // compress mostRecentActivity to instanceId only
+          const smallResult = { ...result };
+          if (smallResult.mostRecentActivity) {
+            const iid = smallResult.mostRecentActivity.instanceId ?? smallResult.mostRecentActivity.instance_id ?? null;
+            smallResult.mostRecentActivity = iid ? { instanceId: String(iid) } : null;
+          }
           if (this.env.BUNGIE_STATS) {
             try {
-              await this.env.BUNGIE_STATS.put(kvKey, JSON.stringify({ ...result, fetchedAt: new Date().toISOString() }));
-              console.log('[MemberWorker] wrote KV', kvKey, 'clears=', result.clears, 'mostRecent=', !!result.mostRecentActivity);
+              await this.env.BUNGIE_STATS.put(kvKey, JSON.stringify({ ...smallResult, fetchedAt: new Date().toISOString() }));
+              console.log('[MemberWorker] wrote KV', kvKey, 'clears=', result.clears, 'mostRecentInstance=', !!smallResult.mostRecentActivity);
             } catch (e) {
               console.error('[MemberWorker] KV write failed for', kvKey, e && e.message ? e.message : e);
               job.state = 'pending';
@@ -147,7 +148,6 @@ export class MemberWorker {
             console.warn('[MemberWorker] no KV namespace bound; skipping character_clears write for', kvKey);
           }
 
-          // mark done
           job.state = 'done';
           job.result = result;
           job.completedAt = new Date().toISOString();
@@ -156,7 +156,6 @@ export class MemberWorker {
           console.log('[MemberWorker] COMPLETED character job', membershipId, characterId);
           return;
         } catch (err) {
-          // handle deadline or other errors by scheduling retry
           if (err && (err.message === 'deadline_exceeded' || err.name === 'deadline_exceeded')) {
             console.warn('[MemberWorker] character compute exceeded budget, scheduling retry for', membershipId, characterId);
             job.state = 'pending';
@@ -171,21 +170,23 @@ export class MemberWorker {
         }
       }
 
-      // Otherwise, fallback to original per-member compute (legacy path)
+      // fallback per-member compute (legacy) - compress mostRecentActivity when writing
       console.log('[MemberWorker] computing clears for (member-level)', membershipId);
       const result = await computeClearsForMember({ membershipId, membershipType }, this.env, opts);
       console.log('[MemberWorker] computeClearsForMember DONE for', membershipId, 'clears=', result.clears, 'prophecy=', result.prophecyClears);
 
-      // write per-member KV (member_clears:<membershipId>)
       if (this.env.BUNGIE_STATS) {
         const kvKey = `member_clears:${membershipId}`;
-        const out = { ...result, fetchedAt: new Date().toISOString() };
+        const out = { ...result };
+        if (out.mostRecentActivity) {
+          const iid = out.mostRecentActivity.instanceId ?? out.mostRecentActivity.instance_id ?? null;
+          out.mostRecentActivity = iid ? { instanceId: String(iid) } : null;
+        }
         try {
-          await this.env.BUNGIE_STATS.put(kvKey, JSON.stringify(out));
-          console.log('[MemberWorker] wrote KV', kvKey, 'mostRecentActivity=', !!out.mostRecentActivity);
+          await this.env.BUNGIE_STATS.put(kvKey, JSON.stringify({ ...out, fetchedAt: new Date().toISOString() }));
+          console.log('[MemberWorker] wrote KV', kvKey, 'mostRecentInstance=', !!out.mostRecentActivity);
         } catch (e) {
           console.error('[MemberWorker] KV write failed for', membershipId, e && e.message ? e.message : e);
-          // schedule retry
           job.state = 'pending';
           job.error = e && e.message ? e.message : String(e);
           job.lastUpdatedAt = new Date().toISOString();
@@ -197,7 +198,6 @@ export class MemberWorker {
         console.warn('[MemberWorker] no KV namespace bound; skipping member_clears write for', membershipId);
       }
 
-      // mark done
       job.state = 'done';
       job.result = result;
       job.completedAt = new Date().toISOString();
@@ -207,7 +207,6 @@ export class MemberWorker {
       return;
     } catch (err) {
       console.error('[MemberWorker] jobRun fatal for', job.membershipId, job.characterId || '', err && err.message ? err.message : err);
-      // mark pending and retry later
       try {
         const j = await this.state.storage.get(jobKey);
         if (j) {
@@ -222,7 +221,6 @@ export class MemberWorker {
       }
       return;
     } finally {
-      // remove transient lock
       try {
         const j = await this.state.storage.get(jobKey);
         if (j) { delete j.lockedAt; await this.state.storage.put(jobKey, j); }
