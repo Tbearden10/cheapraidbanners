@@ -159,6 +159,29 @@ async function fetchPgcrAndCache(env, instanceId, cacheTtlSec = 86400) {
   return normalized;
 }
 
+async function readCachedMembersFromKV(env) {
+  if (!env.BUNGIE_STATS) return null;
+  try {
+    const listed = await env.BUNGIE_STATS.list({ prefix: 'member:' });
+    const keys = (listed && listed.keys) ? listed.keys.map(k => k.name) : [];
+    const members = [];
+    for (const key of keys) {
+      try {
+        const raw = await env.BUNGIE_STATS.get(key);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        members.push(parsed);
+      } catch (e) {
+        // skip malformed
+      }
+    }
+    return { members, memberCount: members.length, fetchedAt: new Date().toISOString() };
+  } catch (e) {
+    console.warn('[index] readCachedMembersFromKV failed', e && e.message ? e.message : e);
+    return null;
+  }
+}
+
 export default {
   // HTTP handler for frontend & admin
   async fetch(request, env) {
@@ -170,48 +193,55 @@ export default {
     if (request.method === 'GET' && path === '/members') {
       const wantFresh = search.has('fresh');
       const wantCached = search.has('cached') || (!wantFresh && !!env.BUNGIE_STATS);
-
-      if (wantCached && env.BUNGIE_STATS) {
-        try {
-          // List per-member keys and fetch each
-          const listed = await env.BUNGIE_STATS.list({ prefix: 'member:' });
-          const keys = (listed && listed.keys) ? listed.keys.map(k => k.name) : [];
-          const members = [];
-          for (const key of keys) {
-            try {
-              const raw = await env.BUNGIE_STATS.get(key);
-              if (!raw) continue;
-              const parsed = JSON.parse(raw);
-              members.push(parsed);
-            } catch (e) { /* skip malformed */ }
-          }
-          return jsonResponse({ fetchedAt: new Date().toISOString(), members, memberCount: members.length });
-        } catch (e) {
-          console.warn('[index] KV read members (per-member keys) failed', e && e.message ? e.message : e);
-          // fall through to fresh flow
-        }
-      }
-
-      // Trigger GlobalStats DO to refresh members
       const wait = shouldWait(request.url, request);
+
+      // Always attempt to read cached members first to return something quickly for UI.
+      const cached = await readCachedMembersFromKV(env);
+
+      // Fire an unconditional background refresh of members (user requested that "after checks from bungie no matter what too")
+      // If caller requested synchronous wait, we'll forward and await below instead.
       try {
         const id = env.GLOBAL_STATS.idFromName('global');
         const stub = env.GLOBAL_STATS.get(id);
-        const body = JSON.stringify({});
-        if (!wait) {
-          // fire-and-forget
-          stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
-            .then(async (r) => { try { const t = await r.text().catch(() => null); console.log('[index] update-members background', r.status, (t||'').slice(0,200)); } catch(e){} })
+        if (!wait && cached && Array.isArray(cached.members)) {
+          // Background refresh (fire-and-forget) but always attempted
+          stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+            .then(async (r) => { try { const t = await r.text().catch(() => null); console.log('[index] background update-members', r.status, (t||'').slice(0,200)); } catch(e){} })
             .catch(err => console.error('[index] bg update-members failed', err));
-          return jsonResponse({ ok: true, job: 'accepted', message: 'Members refresh dispatched' }, 202);
-        } else {
-          // synchronous wait for DO
-          const res = await stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+          // Return cached right away, annotating that a background refresh was kicked off.
+          const out = { fetchedAt: cached.fetchedAt, members: cached.members, memberCount: cached.memberCount, _backgroundRefresh: true };
+          return jsonResponse(out);
+        }
+
+        // If caller explicitly asked for fresh OR there's no cached data, forward to DO and (optionally) wait.
+        if (wait) {
+          // synchronous forwarding to DO; this will run update-members and return members array.
+          const res = await stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
           const text = await res.text().catch(() => null);
-          return new Response(text || JSON.stringify({ ok: false }), { status: res.status, headers: { 'Content-Type': 'application/json' }});
+          // If DO returned JSON members, pass it through; otherwise return what it returned.
+          try {
+            return new Response(text || JSON.stringify({ ok: false }), { status: res.status, headers: { 'Content-Type': 'application/json' }});
+          } catch (e) {
+            return jsonResponse({ ok: false, reason: 'do_response_parse_failed', error: String(e) }, 502);
+          }
+        } else {
+          // No cached data but not waiting: fire-and-forget and return accepted
+          if (!cached || !Array.isArray(cached.members) || cached.members.length === 0) {
+            stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+              .then(async (r) => { try { const t = await r.text().catch(() => null); console.log('[index] background update-members (no-cached)', r.status, (t||'').slice(0,200)); } catch(e){} })
+              .catch(err => console.error('[index] bg update-members failed', err));
+            return jsonResponse({ ok: true, job: 'accepted', message: 'Members refresh dispatched' }, 202);
+          }
+          // This branch is unlikely because earlier we returned cached if present; kept for safety.
+          return jsonResponse({ fetchedAt: cached.fetchedAt, members: cached.members, memberCount: cached.memberCount, _backgroundRefresh: true });
         }
       } catch (e) {
         console.error('[index] update-members forward error', e);
+        // If forwarding to DO failed, still return cached if available; otherwise error.
+        if (cached && Array.isArray(cached.members)) {
+          const out = { fetchedAt: cached.fetchedAt, members: cached.members, memberCount: cached.memberCount, _backgroundRefresh: false, _refreshError: String(e) };
+          return jsonResponse(out);
+        }
         return jsonResponse({ ok: false, reason: 'do_forward_failed', error: String(e) }, 500);
       }
     }
