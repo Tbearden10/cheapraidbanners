@@ -15,6 +15,10 @@ routes = [
 # Cron every 5 minutes (keeps member list fresh and runs conditional dispatch)
 crons = ["*/5 * * * *"]
 
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = [ "GlobalStats", "MemberWorker" ]
+
 [[kv_namespaces]]
 binding = "BUNGIE_STATS"
 id = "3ac5034307be43da8c41bba24cb67c87"
@@ -44,3 +48,6 @@ KV_PER_MEMBER_BATCH_SIZE = "50"
 # online/offline intervals (ms)
 ONLINE_CLEARS_INTERVAL_MS = "300000"   # 5 minutes
 OFFLINE_CLEARS_INTERVAL_MS = "7200000" # 2 hours
+
+ADMIN_TOKEN="dares6767bellydog"
+BUNGIE_API_KEY="168a567f650d45af8276b6ca5d09ea56"

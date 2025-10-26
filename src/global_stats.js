@@ -1,8 +1,6 @@
 // Durable Object: GlobalStats
-// - Fetches clan roster, enriches members with emblem data, persists per-member KV keys `member:<id>`
-// - Dispatches per-member jobs to MEMBER_WORKER for clears computation
-// - update-clears can dispatch per-member jobs or compute synchronously (fallback)
-// - Aggregates per-member KV entries and now selects a single mostRecentClanActivity (prefers multi-member instance)
+// - Updated to dispatch per-character jobs in update-clears instead of per-member.
+// - Aggregation reads character_clears:{membershipId}:{characterId} keys and folds them into per-member results.
 
 import { computeClearsForMembers } from './lib/bungieApi.js';
 
@@ -76,7 +74,7 @@ export class GlobalStats {
     return arr;
   }
 
-  // ----- emblem fetching helpers -----
+  // ----- emblem fetching helpers (unchanged) -----
   _makeProfileUrl(membershipType, membershipId) {
     return `https://www.bungie.net/Platform/Destiny2/${membershipType}/Profile/${encodeURIComponent(membershipId)}?components=100,200`;
   }
@@ -186,14 +184,15 @@ export class GlobalStats {
     return true;
   }
 
-  async _dispatchMemberJob(member, opts = {}) {
+  async _dispatchCharacterJob(membershipId, membershipType, characterId, opts = {}) {
     try {
-      const idStr = String(member.membershipId);
+      const idStr = String(membershipId);
       const memberDoId = this.env.MEMBER_WORKER.idFromName(`member-${idStr}`);
       const memberStub = this.env.MEMBER_WORKER.get(memberDoId);
       const body = JSON.stringify({
         membershipId: idStr,
-        membershipType: Number(member.membershipType || 0),
+        membershipType: Number(membershipType || 0),
+        characterId: String(characterId),
         opts,
       });
       memberStub.fetch('https://member.local/process', {
@@ -203,10 +202,10 @@ export class GlobalStats {
       }).then(async (res) => {
         try {
           const text = await res.text().catch(() => null);
-          console.log('[GlobalStats] member job ack', idStr, res.status, text && String(text).slice(0,200));
+          console.log('[GlobalStats] character job ack', `${idStr}:${characterId}`, res.status, text && String(text).slice(0,200));
         } catch (e) {}
       }).catch((err) => {
-        console.warn('[GlobalStats] member job dispatch failed for', idStr, err && err.message ? err.message : err);
+        console.warn('[GlobalStats] character job dispatch failed for', `${idStr}:${characterId}`, err && err.message ? err.message : err);
       });
       return true;
     } catch (err) {
@@ -215,109 +214,158 @@ export class GlobalStats {
     }
   }
 
-  async _readMemberKV(membershipId) {
+  async _readCharacterKV(membershipId, characterId) {
     if (!this.env.BUNGIE_STATS) return null;
     try {
-      const raw = await this.env.BUNGIE_STATS.get(`member_clears:${membershipId}`);
+      const raw = await this.env.BUNGIE_STATS.get(`character_clears:${membershipId}:${characterId}`);
       if (!raw) return null;
       return JSON.parse(raw);
     } catch (e) {
-      console.warn('[GlobalStats] KV read member failed', membershipId, e && e.message ? e.message : e);
+      console.warn('[GlobalStats] KV read character failed', membershipId, characterId, e && e.message ? e.message : e);
       return null;
     }
   }
 
-  async _aggregateFromMemberKV(members) {
+  async _aggregateFromCharacterKV(members) {
+    // members: array of member objects { membershipId, membershipType, ... }
+    // We'll read all character_clears keys and aggregate per-member.
     const perMember = [];
     let total = 0;
     let totalProphecy = 0;
 
-    // map instanceId -> { periodTs, activity, membershipIds: Set }
+    // We'll also build instanceMap to find mostRecentClanActivity (same logic as before)
     const instanceMap = new Map();
-
-    let globalLatestSolo = null; // fallback most recent across all members (if no multi-member activity found)
+    let globalLatestSolo = null;
 
     for (const m of members) {
       try {
         const idStr = String(m.membershipId);
-        const kv = await this._readMemberKV(idStr);
-        if (!kv) continue;
-        const c = Number(kv.clears || 0);
-        const p = Number(kv.prophecyClears || 0);
-        total += Number(c || 0);
-        totalProphecy += Number(p || 0);
+        // list character keys for this membershipId
+        // NOTE: Workers KV doesn't support efficient hierarchical listing; we'll attempt to list with prefix
+        if (!this.env.BUNGIE_STATS) continue;
+        const listed = await this.env.BUNGIE_STATS.list({ prefix: `character_clears:${idStr}:` });
+        const keys = (listed && listed.keys) ? listed.keys.map(k => k.name) : [];
+        // If no character-level keys exist, fall back to member_clears:<id> if present
+        if (!keys.length) {
+          try {
+            const rawMember = await this.env.BUNGIE_STATS.get(`member_clears:${idStr}`);
+            if (rawMember) {
+              const kv = JSON.parse(rawMember);
+              const c = Number(kv.clears || 0);
+              const p = Number(kv.prophecyClears || 0);
+              total += c;
+              totalProphecy += p;
+              perMember.push({
+                membershipId: idStr,
+                membershipType: Number(m.membershipType || 0),
+                clears: c,
+                prophecyClears: p,
+                lastActivityAt: kv.lastActivityAt || null,
+                mostRecentActivity: kv.mostRecentActivity || null
+              });
+              // record instance if present
+              const mra = kv.mostRecentActivity;
+              if (mra && mra.instanceId && mra.period) {
+                const inst = String(mra.instanceId);
+                const ts = Date.parse(mra.period) || 0;
+                const existing = instanceMap.get(inst);
+                if (!existing) {
+                  instanceMap.set(inst, { periodTs: ts, activity: mra, membershipIds: new Set([idStr]) });
+                } else {
+                  if (ts > (existing.periodTs || 0)) { existing.periodTs = ts; existing.activity = mra; }
+                  existing.membershipIds.add(idStr);
+                }
+              }
+              continue;
+            }
+          } catch (e) {
+            // swallow and continue
+          }
+        }
 
-        const memberEntry = {
+        // accumulate across character keys
+        let memberClears = 0;
+        let memberProphecyClears = 0;
+        let memberLastActivity = null;
+        let memberMostRecentActivity = null;
+
+        for (const key of keys) {
+          try {
+            const raw = await this.env.BUNGIE_STATS.get(key);
+            if (!raw) continue;
+            const kv = JSON.parse(raw);
+            const c = Number(kv.clears || 0);
+            const p = Number(kv.prophecyClears || 0);
+            memberClears += c;
+            memberProphecyClears += p;
+            // pick latest character lastActivity
+            if (kv.lastActivityAt) {
+              if (!memberLastActivity || Date.parse(kv.lastActivityAt) > Date.parse(memberLastActivity)) {
+                memberLastActivity = kv.lastActivityAt;
+              }
+            }
+            // pick most recentActivity across characters
+            if (kv.mostRecentActivity && kv.mostRecentActivity.period) {
+              if (!memberMostRecentActivity || Date.parse(kv.mostRecentActivity.period) > Date.parse(memberMostRecentActivity.period)) {
+                memberMostRecentActivity = kv.mostRecentActivity;
+              }
+            }
+            // add to instanceMap if character-level activity contains instanceId
+            const mra = kv.mostRecentActivity;
+            if (mra && mra.instanceId && mra.period) {
+              const inst = String(mra.instanceId);
+              const ts = Date.parse(mra.period) || 0;
+              const existing = instanceMap.get(inst);
+              if (!existing) {
+                instanceMap.set(inst, { periodTs: ts, activity: mra, membershipIds: new Set([idStr]) });
+              } else {
+                if (ts > (existing.periodTs || 0)) { existing.periodTs = ts; existing.activity = mra; }
+                existing.membershipIds.add(idStr);
+              }
+            }
+          } catch (e) {
+            // skip malformed
+          }
+        }
+
+        total += memberClears;
+        totalProphecy += memberProphecyClears;
+        perMember.push({
           membershipId: idStr,
           membershipType: Number(m.membershipType || 0),
-          clears: Number(c || 0),
-          prophecyClears: Number(p || 0),
-          lastActivityAt: kv.lastActivityAt || null,
-          mostRecentActivity: kv.mostRecentActivity || null
-        };
+          clears: memberClears,
+          prophecyClears: memberProphecyClears,
+          lastActivityAt: memberLastActivity,
+          mostRecentActivity: memberMostRecentActivity
+        });
 
-        // If the member has mostRecentActivity with instanceId, record it in instanceMap
-        const mra = memberEntry.mostRecentActivity;
-        if (mra && mra.instanceId && mra.period) {
-          const inst = String(mra.instanceId);
-          const ts = Date.parse(mra.period) || 0;
-          const existing = instanceMap.get(inst);
-          if (!existing) {
-            instanceMap.set(inst, {
-              periodTs: ts,
-              activity: mra,
-              membershipIds: new Set([idStr])
-            });
-          } else {
-            // update latest periodTs if this occurrence is newer
-            if (ts > (existing.periodTs || 0)) {
-              existing.periodTs = ts;
-              existing.activity = mra;
-            }
-            existing.membershipIds.add(idStr);
-          }
-        }
-
-        // Track global latest solo as fallback
-        if (!globalLatestSolo && mra && mra.period) {
-          globalLatestSolo = { membershipId: idStr, activity: mra, periodTs: Date.parse(mra.period) || 0 };
-        } else if (mra && mra.period) {
-          const ts = Date.parse(mra.period) || 0;
+        // update globalLatestSolo
+        if (memberMostRecentActivity && memberMostRecentActivity.period) {
+          const ts = Date.parse(memberMostRecentActivity.period) || 0;
           if (!globalLatestSolo || ts > (globalLatestSolo.periodTs || 0)) {
-            globalLatestSolo = { membershipId: idStr, activity: mra, periodTs: ts };
+            globalLatestSolo = { membershipId: idStr, activity: memberMostRecentActivity, periodTs: ts };
           }
         }
-
-        perMember.push(memberEntry);
       } catch (e) {
         console.warn('[GlobalStats] aggregation error for', m && m.membershipId, e && e.message ? e.message : e);
         continue;
       }
     }
 
-    // Determine a mostRecentClanActivity:
-    // 1) find all instanceIds with membershipIds.size >= 2, pick the one with largest periodTs
-    // 2) if none, pick the latest overall (globalLatestSolo)
-    // 3) if still none, pick a random per-member activity if available
+    // Decide mostRecentClanActivity using instanceMap (prefer multi-member instances)
     let chosen = null;
     let chosenTs = 0;
     for (const [inst, info] of instanceMap.entries()) {
       const count = (info.membershipIds && info.membershipIds.size) ? info.membershipIds.size : 0;
       if (count >= 2) {
         if (!chosen || (info.periodTs || 0) > chosenTs) {
-          chosen = {
-            instanceId: inst,
-            activity: info.activity,
-            membershipIds: Array.from(info.membershipIds),
-            periodTs: info.periodTs || 0
-          };
+          chosen = { instanceId: inst, activity: info.activity, membershipIds: Array.from(info.membershipIds), periodTs: info.periodTs || 0 };
           chosenTs = info.periodTs || 0;
         }
       }
     }
 
     if (!chosen) {
-      // fallback to latest solo (mostRecentActivity across members)
       if (globalLatestSolo && globalLatestSolo.activity) {
         chosen = {
           instanceId: globalLatestSolo.activity.instanceId || null,
@@ -327,7 +375,6 @@ export class GlobalStats {
           fallback: 'solo'
         };
       } else if (perMember.length) {
-        // ultimate fallback: random pick
         for (const pm of perMember) {
           if (pm.mostRecentActivity && pm.mostRecentActivity.instanceId) {
             chosen = {
@@ -378,7 +425,7 @@ export class GlobalStats {
 
   _sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-  // update-members: write per-member KV entries (member:<id>), remove stale keys, enqueue new
+  // update-members: same as before (writes member:<id> keys)
   async _handleUpdateMembers({ force = false } = {}) {
     const last = (await this.state.storage.get('lastMembersUpdateAt')) || 0;
     const minMs = Number(this.env.MIN_MEMBERS_UPDATE_INTERVAL_MS || 0);
@@ -398,7 +445,7 @@ export class GlobalStats {
       console.warn('[GlobalStats] populateMemberEmblems failed', e && e.message ? e.message : e);
     }
 
-    // Build a small member payload and persist per-member KV keys
+    // Build small member payload and persist keys
     const memberMap = new Map();
     for (const m of members) {
       const id = String(m.membershipId);
@@ -418,38 +465,30 @@ export class GlobalStats {
 
     if (this.env.BUNGIE_STATS) {
       try {
-        // list existing member: keys
         const listed = await this.env.BUNGIE_STATS.list({ prefix: 'member:' });
         const existingKeys = (listed && listed.keys) ? listed.keys.map(k => k.name) : [];
         const existingIds = new Set(existingKeys.map(k => k.replace(/^member:/, '')));
-
         const newIds = new Set(Array.from(memberMap.keys()));
 
-        // write or update member:<id> where necessary
         for (const [id, small] of memberMap.entries()) {
           const keyName = `member:${id}`;
           if (!existingIds.has(id)) {
-            // new member - write key
             await this.env.BUNGIE_STATS.put(keyName, JSON.stringify(small));
             console.log('[GlobalStats] wrote member KV', keyName);
           } else {
-            // existing - check if content differs (fast path: read and compare)
             try {
               const raw = await this.env.BUNGIE_STATS.get(keyName);
               const prev = raw ? JSON.parse(raw) : null;
-              // shallow compare essential fields
               if (!prev || prev.supplementalDisplayName !== small.supplementalDisplayName || prev.emblemPath !== small.emblemPath || prev.joinDate !== small.joinDate) {
                 await this.env.BUNGIE_STATS.put(keyName, JSON.stringify(small));
                 console.log('[GlobalStats] updated member KV', keyName);
               }
             } catch (e) {
-              // If read fails, attempt to write to ensure presence
               await this.env.BUNGIE_STATS.put(keyName, JSON.stringify(small));
             }
           }
         }
 
-        // delete keys for members no longer present
         for (const existingKey of existingKeys) {
           const id = existingKey.replace(/^member:/, '');
           if (!newIds.has(id)) {
@@ -461,15 +500,6 @@ export class GlobalStats {
             }
           }
         }
-
-        // Enqueue per-member job for newly added members (prevIds computed from existingKeys)
-        const prevIds = new Set(existingKeys.map(k => k.replace(/^member:/, '')));
-        for (const m of members) {
-          const idStr = String(m.membershipId);
-          if (!prevIds.has(idStr)) {
-            this._dispatchMemberJob(m, { includeDeletedCharacters: true }).catch(() => {});
-          }
-        }
       } catch (e) {
         console.warn('[GlobalStats] members_list KV operations failed', e && e.message ? e.message : e);
       }
@@ -479,7 +509,7 @@ export class GlobalStats {
     return { ok: true, members, fetchedAt, memberCount: members.length };
   }
 
-  // Full implementation of update-clears: dispatch per-member jobs or compute synchronously and write clears_snapshot
+  // update-clears: dispatch one job per character (faster per-job)
   async _handleUpdateClearsImpl({ userLimit = null, waitForCompletion = false, waitTimeoutMs = 120000, opts = {} } = {}) {
     // fetch roster to know which members to dispatch
     const raw = await this._fetchClanRosterRaw();
@@ -489,8 +519,8 @@ export class GlobalStats {
     const limit = userLimit ? Math.min(Number(userLimit), members.length) : members.length;
     let dispatched = 0;
 
-    // Default opts: include deleted characters by default, forward fetchAll flag if provided
-    const memberOpts = {
+    // Default opts forwarded to character-level jobs
+    const jobOpts = {
       includeDeletedCharacters: opts.includeDeletedCharacters ?? true,
       fetchAllActivitiesForCharacter: opts.fetchAllActivitiesForCharacter ?? false,
       pageSize: opts.pageSize,
@@ -499,115 +529,107 @@ export class GlobalStats {
       backoffBaseMs: opts.backoffBaseMs,
     };
 
+    // For each member, enumerate characters (prefer Stats endpoint), then dispatch one job per character
     for (let i = 0; i < limit; i++) {
       const m = members[i];
-      const ok = await this._dispatchMemberJob(m, memberOpts);
-      if (ok) dispatched++;
-      // optionally small delay between dispatches to avoid bursts
-      if (this.env.MEMBER_DISPATCH_THROTTLE_MS) {
-        await this._sleep(Number(this.env.MEMBER_DISPATCH_THROTTLE_MS));
+      const membershipId = String(m.membershipId);
+      const membershipType = Number(m.membershipType || 0);
+
+      // enumerate character IDs for this member
+      let characterIds = [];
+      try {
+        // prefer the account Stats endpoint
+        const stats = await fetch(`https://www.bungie.net/Platform/Destiny2/${membershipType}/Account/${encodeURIComponent(membershipId)}/Stats/`, { headers: this.env.BUNGIE_API_KEY ? { 'X-API-Key': this.env.BUNGIE_API_KEY } : undefined });
+        if (stats && stats.ok) {
+          const payload = await stats.json().catch(() => null);
+          const rawChars = payload?.Response?.characters ?? null;
+          if (Array.isArray(rawChars)) characterIds = rawChars.map(c => String(c.characterId));
+          else if (rawChars && typeof rawChars === 'object') characterIds = Object.keys(rawChars).map(k => String(k));
+        }
+      } catch (e) {
+        // fallback to profile endpoint (simpler)
+        try {
+          const profRes = await fetch(`https://www.bungie.net/Platform/Destiny2/${membershipType}/Profile/${encodeURIComponent(membershipId)}?components=200`, { headers: this.env.BUNGIE_API_KEY ? { 'X-API-Key': this.env.BUNGIE_API_KEY } : undefined });
+          if (profRes && profRes.ok) {
+            const payload = await profRes.json().catch(() => null);
+            const chars = payload?.Response?.characters?.data ?? {};
+            characterIds = Object.keys(chars || {});
+          }
+        } catch (e2) {
+          // give up for this member
+          characterIds = [];
+        }
+      }
+
+      if (!Array.isArray(characterIds) || characterIds.length === 0) {
+        // If no character ids, still dispatch a member-level job for compatibility
+        const ok = await this._dispatchCharacterJob(membershipId, membershipType, '', jobOpts);
+        if (ok) dispatched++;
+        continue;
+      }
+
+      for (const cid of characterIds) {
+        const ok = await this._dispatchCharacterJob(membershipId, membershipType, cid, jobOpts);
+        if (ok) dispatched++;
+        // throttle between dispatches
+        if (this.env.MEMBER_DISPATCH_THROTTLE_MS) await this._sleep(Number(this.env.MEMBER_DISPATCH_THROTTLE_MS));
       }
     }
 
     await this.state.storage.put('lastClearsDispatchedAt', fetchedAt);
 
-    // If not waiting, return quickly with dispatched info
     if (!waitForCompletion) {
       return { ok: true, dispatched, totalMembers: members.length, fetchedAt };
     }
 
-    // If waiting, two strategies:
-    // 1) Poll per-member KV for results until timeout (best-effort)
-    // 2) If polling does not find all results in time, fallback to computing directly
+    // Wait for character-level KV results
     const start = Date.now();
     const deadline = start + Number(waitTimeoutMs || 120000);
-    const remainingMemberIds = members.slice(0, limit).map(m => String(m.membershipId));
-    const found = new Set();
 
+    // Build list of expected character keys
+    const expectedKeys = [];
+    for (let i = 0; i < limit; i++) {
+      const m = members[i];
+      const membershipId = String(m.membershipId);
+      // try to list characters again quickly (best-effort)
+      try {
+        const listed = await this.env.BUNGIE_STATS.list({ prefix: `character_clears:${membershipId}:` });
+        const keys = (listed && listed.keys) ? listed.keys.map(k => k.name) : [];
+        if (keys.length) {
+          for (const k of keys) expectedKeys.push(k);
+        } else {
+          // fall back to member-level key expectation if no character keys found
+          expectedKeys.push(`member_clears:${membershipId}`);
+        }
+      } catch (e) {
+        expectedKeys.push(`member_clears:${membershipId}`);
+      }
+    }
+
+    const found = new Set();
     // Poll loop
     while (Date.now() < deadline) {
-      for (const id of remainingMemberIds) {
-        if (found.has(id)) continue;
-        const kv = await this._readMemberKV(id);
-        if (kv && (typeof kv.clears !== 'undefined' || typeof kv.prophecyClears !== 'undefined')) {
-          found.add(id);
+      for (const key of expectedKeys) {
+        if (found.has(key)) continue;
+        try {
+          const raw = await this.env.BUNGIE_STATS.get(key);
+          if (raw) found.add(key);
+        } catch (e) {
+          // ignore KV read errors
         }
       }
-      if (found.size >= remainingMemberIds.length) break;
-      // small backoff between polls
+      if (found.size >= expectedKeys.length) break;
       await this._sleep(1500);
     }
 
-    // If we found all per-member KV entries, aggregate them.
-    if (found.size >= remainingMemberIds.length) {
-      const { clears, prophecyClears, perMember } = await this._aggregateFromMemberKV(members.slice(0, limit));
-      const snapshot = {
-        fetchedAt: new Date().toISOString(),
-        source: 'per-member-kv',
-        clears,
-        prophecyClears,
-        perMember,
-        memberCount: members.length,
-        processedCount: perMember.length
-      };
+    // Aggregate from character-level KV where available (fallback to member-level)
+    const snapshot = await this._aggregateFromCharacterKV(members.slice(0, limit));
+    snapshot.source = 'character-per-job';
+    // Persist
+    await this._writeClearsSnapshot(snapshot);
+    await this.state.storage.put('lastClearsFetchedAt', snapshot.fetchedAt);
 
-      // Persist snapshot to KV
-      await this._writeClearsSnapshot(snapshot);
-      await this.state.storage.put('lastClearsFetchedAt', snapshot.fetchedAt);
-
-      return { ok: true, dispatched, totalMembers: members.length, fetchedAt: snapshot.fetchedAt, snapshot };
-    }
-
-    // If we didn't find all results before timeout, compute synchronously directly (fallback)
-    try {
-      // Run server-side compute across the members slice using computeClearsForMembers (streaming, server-side)
-      const computeOpts = {
-        userLimit: limit,
-        concurrency: Number(this.env.BUNGIE_FETCH_CONCURRENCY || 2),
-        pageSize: memberOpts.pageSize,
-        maxPages: memberOpts.maxPages,
-        timeoutMs: Number(this.env.BUNGIE_PER_REQUEST_TIMEOUT_MS || 8000),
-        retries: memberOpts.retries,
-        backoffBaseMs: memberOpts.backoffBaseMs,
-        includeDeletedCharacters: memberOpts.includeDeletedCharacters,
-        fetchAllActivitiesForCharacter: memberOpts.fetchAllActivitiesForCharacter
-      };
-
-      const result = await computeClearsForMembers(members, this.env, computeOpts);
-
-      // Normalize snapshot
-      const snapshot = {
-        fetchedAt: result.fetchedAt || new Date().toISOString(),
-        source: 'server-compute-fallback',
-        clears: Number(result.clears || 0),
-        prophecyClears: Number(result.prophecyClears || 0),
-        perMember: Array.isArray(result.perMember) ? result.perMember : [],
-        memberCount: members.length,
-        processedCount: Array.isArray(result.perMember) ? result.perMember.length : 0
-      };
-
-      // Persist to KV
-      await this._writeClearsSnapshot(snapshot);
-      await this.state.storage.put('lastClearsFetchedAt', snapshot.fetchedAt);
-
-      return { ok: true, dispatched, totalMembers: members.length, fetchedAt: snapshot.fetchedAt, snapshot };
-    } catch (err) {
-      console.error('[GlobalStats] synchronous compute failed', err && (err.message || err));
-      // If sync compute fails, still return what we have (best-effort)
-      const { clears, prophecyClears, perMember } = await this._aggregateFromMemberKV(members.slice(0, limit));
-      const snapshot = {
-        fetchedAt: new Date().toISOString(),
-        source: 'partial-aggregate',
-        clears,
-        prophecyClears,
-        perMember,
-        memberCount: members.length,
-        processedCount: perMember.length
-      };
-      await this._writeClearsSnapshot(snapshot);
-      await this.state.storage.put('lastClearsFetchedAt', snapshot.fetchedAt);
-      return { ok: true, dispatched, totalMembers: members.length, fetchedAt: snapshot.fetchedAt, snapshot, warning: 'sync_compute_failed' };
-    }
+    return { ok: true, dispatched, totalMembers: members.length, fetchedAt: snapshot.fetchedAt, snapshot };
   }
 
   async _handleDebug() {
@@ -662,7 +684,8 @@ export class GlobalStats {
         const parsed = JSON.parse(raw);
         return new Response(JSON.stringify(parsed), { headers: { 'Content-Type': 'application/json' }});
       } catch (e) {
-        return new Response(JSON.stringify({ ok: false, reason: 'kv_read_failed', error: e && e.message ? e.message : String(e) }), { status: 500, headers: { 'Content-Type': 'application/json' }});
+        console.warn('[GlobalStats] KV read clears_snapshot failed', e && e.message ? e.message : e);
+        return new Response(JSON.stringify({ ok: false, reason: 'kv_read_failed', error: String(e) }), { status: 500, headers: { 'Content-Type': 'application/json' }});
       }
     }
 

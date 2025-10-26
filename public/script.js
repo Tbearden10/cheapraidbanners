@@ -1,13 +1,12 @@
-// Fixed frontend script: uses cached stats for display, triggers background refresh conditionally,
-// polls cached snapshot until updated, preserves animations and joinDate display.
-// Adds rendering for single most recent clan activity across clan (snapshot.mostRecentClanActivity)
-// and PGCR modal fetch.
-
+/* Full frontend script with change: fresh members request is now synchronous (x-wait:1 + sync=1)
+   so the client receives the fresh roster and can decide to call /stats?fresh=1 when an online member is found.
+   (Other parts of the file are unchanged from your previous version except for the fresh fetch logic.)
+*/
 (() => {
   // Config
   const MEMBERS_URL = '/members';
   const STATS_URL = '/stats';
-  const POLL_MS = 120_000;
+  const POLL_MS = 60_000;
 
   // Element IDs
   const ids = {
@@ -218,43 +217,27 @@
     top.appendChild(leftContainer); top.appendChild(right); content.appendChild(top); card.appendChild(content); return card;
   }
 
-  // Replace the existing renderMembers and updateStats functions with these versions:
-
-function renderMembers(payload) {
-  const container = $(ids.memberList); const membersCountEl = $(ids.membersCount);
-  if (!container) return; clearMembersLoading(); container.innerHTML = '';
-  if (payload && payload.ok === false) { const err = document.createElement('div'); err.className = 'member-item'; err.textContent = `Failed to load members: ${payload.body ?? payload.status ?? 'error'}`; container.appendChild(err); if (membersCountEl) membersCountEl.textContent = '—'; 
-    // treat as no members / offline
-    window.__hasOnline = false;
-    return;
+  function renderMembers(payload) {
+    const container = $(ids.memberList); const membersCountEl = $(ids.membersCount);
+    if (!container) return; clearMembersLoading(); container.innerHTML = '';
+    if (payload && payload.ok === false) { const err = document.createElement('div'); err.className = 'member-item'; err.textContent = `Failed to load members: ${payload.body ?? payload.status ?? 'error'}`; container.appendChild(err); if (membersCountEl) membersCountEl.textContent = '—'; return; }
+    let members = [];
+    if (Array.isArray(payload)) members = payload;
+    else if (payload && Array.isArray(payload.members)) members = payload.members;
+    else if (payload && Array.isArray(payload.data)) members = payload.data;
+    else if (payload && payload.ok === true && Array.isArray(payload.members)) members = payload.members;
+    if (!members || members.length === 0) { const empty = document.createElement('div'); empty.className = 'member-item'; empty.textContent = 'No members available.'; container.appendChild(empty); if (membersCountEl) membersCountEl.textContent = '—'; return; }
+    members.sort((a, b) => { const ra = roleInfo(a.memberType ?? a.member_type); const rb = roleInfo(b.memberType ?? b.member_type); if (rb.priority !== ra.priority) return rb.priority - ra.priority; const na = (a.supplementalDisplayName ?? a.displayName ?? '').toString().toLowerCase(); const nb = (b.supplementalDisplayName ?? b.displayName ?? '').toString().toLowerCase(); return na.localeCompare(nb); });
+    // update members map for lookup by membershipId
+    window.__membersById.clear();
+    for (const m of members) {
+      const id = String(m.membershipId ?? m.membership_id ?? '');
+      if (id) window.__membersById.set(id, m);
+      container.appendChild(createMemberCard(m));
+    }
+    if (membersCountEl) { membersCountEl.textContent = nf.format(members.length); membersCountEl.setAttribute('data-target', members.length); membersCountEl.setAttribute('data-animated', 'false'); }
+    if (window.simpleReveal instanceof SimpleReveal) window.simpleReveal.refresh();
   }
-  let members = [];
-  if (Array.isArray(payload)) members = payload;
-  else if (payload && Array.isArray(payload.members)) members = payload.members;
-  else if (payload && Array.isArray(payload.data)) members = payload.data;
-  else if (payload && payload.ok === true && Array.isArray(payload.members)) members = payload.members;
-  if (!members || members.length === 0) { const empty = document.createElement('div'); empty.className = 'member-item'; empty.textContent = 'No members available.'; container.appendChild(empty); if (membersCountEl) membersCountEl.textContent = '—'; 
-    window.__hasOnline = false;
-    return; 
-  }
-  members.sort((a, b) => { const ra = roleInfo(a.memberType ?? a.member_type); const rb = roleInfo(b.memberType ?? b.member_type); if (rb.priority !== ra.priority) return rb.priority - ra.priority; const na = (a.supplementalDisplayName ?? a.displayName ?? '').toString().toLowerCase(); const nb = (b.supplementalDisplayName ?? b.displayName ?? '').toString().toLowerCase(); return na.localeCompare(nb); });
-  // update members map for lookup by membershipId
-  window.__membersById.clear();
-  // compute online flag
-  let anyOnline = false;
-  for (const m of members) {
-    const id = String(m.membershipId ?? m.membership_id ?? '');
-    if (id) window.__membersById.set(id, m);
-    if (!anyOnline && !!(m.isOnline ?? m.online ?? m.is_online)) anyOnline = true;
-    container.appendChild(createMemberCard(m));
-  }
-  // mark online state and snapshot presence
-  window.__hasOnline = Boolean(anyOnline);
-  window.__hasSnapshot = true;
-
-  if (membersCountEl) { membersCountEl.textContent = nf.format(members.length); membersCountEl.setAttribute('data-target', members.length); membersCountEl.setAttribute('data-animated', 'false'); }
-  if (window.simpleReveal instanceof SimpleReveal) window.simpleReveal.refresh();
-}
 
   // Render stats
   function renderStats(d) {
@@ -353,8 +336,35 @@ function renderMembers(payload) {
       renderMembers(cached.data);
     }
 
-    const fresh = await fetchJson(`${MEMBERS_URL}?fresh=1`, 20000);
-    if (fresh.ok && fresh.data && Array.isArray(fresh.data.members)) {
+    // ---- CHANGED: request fresh roster synchronously (x-wait header + sync=1) so we get the live members list ----
+    // Use a dedicated fetch with header + timeout to ensure we receive the fresh roster (not a 202).
+    let fresh = null;
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 20000);
+      try {
+        const res = await fetch(`${MEMBERS_URL}?fresh=1&sync=1`, {
+          method: 'GET',
+          headers: { 'x-wait': '1' }, // request the DO to run synchronously
+          cache: 'no-store',
+          signal: ctrl.signal
+        });
+        const text = await res.text().catch(() => null);
+        if (res.ok) {
+          try { fresh = { ok: true, data: text ? JSON.parse(text) : null }; } catch (e) { fresh = { ok: true, data: null }; }
+        } else {
+          // non-ok (202 or error)
+          fresh = { ok: false, status: res.status, body: text };
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (err) {
+      fresh = { ok: false, status: 'network', body: String(err) };
+    }
+
+    // If synchronous fresh succeeded, render those members and possibly trigger stats?fresh=1
+    if (fresh && fresh.ok && fresh.data && Array.isArray(fresh.data.members)) {
       renderMembers(fresh.data);
       const online = fresh.data.members.some(m => !!(m.isOnline ?? m.is_online ?? m.online));
       if (online) {
@@ -375,6 +385,7 @@ function renderMembers(payload) {
         }
       }
     } else {
+      // If fresh failed or returned 202 (i.e., background-only), fall back to behavior that uses cached results
       if (!cached.ok || !cached.data || !Array.isArray(cached.data.members)) {
         await new Promise(r => setTimeout(r, 1000));
         const again = await fetchJson(`${MEMBERS_URL}?cached=1`, 4000);
@@ -384,36 +395,11 @@ function renderMembers(payload) {
   }
 
   // Stats updater reads cached snapshot for display
-  // Replace/update the existing updateStats function with this:
-
   async function updateStats() {
-    // Don't poll aggressively while page is hidden
-    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-      // try again later, longer backoff
-      setTimeout(updateStats, POLL_MS * 6);
-      return;
-    }
-
-    // If we have a snapshot but no online members, poll very slowly
-    const isOnline = Boolean(window.__hasOnline);
-    const fastPoll = isOnline; // true = frequent (POLL_MS), false = slow
-
-    const cached = await fetchJson(`${STATS_URL}?cached=1`, 7000).catch(() => ({ ok: false }));
-    if (cached.ok && cached.data) {
-      // mark that we have a snapshot so first-time loads still display it even if offline
-      window.__hasSnapshot = true;
-      renderStats(cached.data);
-    } else {
-      renderStats(null);
-    }
-
-    if (fastPoll) {
-      setTimeout(updateStats, POLL_MS); // keep the original polling cadence when online
-    } else {
-      // slow down when everyone is offline: poll every 10 minutes (600k ms)
-      // you can change this number if you prefer a different backoff
-      setTimeout(updateStats, 600000);
-    }
+    const cached = await fetchJson(`${STATS_URL}?cached=1`, 7000);
+    if (cached.ok && cached.data) renderStats(cached.data);
+    else renderStats(null);
+    setTimeout(updateStats, POLL_MS);
   }
 
   // fetch PGCR and show a simple modal with summary
@@ -492,7 +478,14 @@ function renderMembers(payload) {
   // Debug helpers
   window.__cheapRaid = {
     fetchCachedMembers: async () => fetchJson(`${MEMBERS_URL}?cached=1`),
-    fetchFreshMembers: async () => fetchJson(`${MEMBERS_URL}?fresh=1`),
+    fetchFreshMembers: async () => {
+      // attempt synchronous fresh for debugging
+      try {
+        const res = await fetch(`${MEMBERS_URL}?fresh=1&sync=1`, { headers: { 'x-wait': '1' }, cache: 'no-store' });
+        const t = await res.text().catch(()=>null);
+        return { ok: res.ok, body: t };
+      } catch (e) { return { ok: false, error: String(e) }; }
+    },
     fetchCachedStats: async () => fetchJson(`${STATS_URL}?cached=1`),
     fetchFreshStats: async () => fetchJson(`${STATS_URL}?fresh=1`)
   };

@@ -1,16 +1,16 @@
 // Durable Object: MemberWorker
-// - POST /process starts/resumes a job
-// - GET  /status  returns stored job state (for observability)
-// - jobRun persists progress and logs key steps to console so wrangler dev output shows activity
+// - Accepts per-character jobs (membershipId + characterId) to compute clears for a single character.
+// - Writes character-level KV keys character_clears:{membershipId}:{characterId}.
+// - Still supports the older per-member compute if called without characterId (backwards-compatible).
 
 import { computePerMemberHistory } from './lib/activityHistory.js';
-import { fetchAggregateActivityStats, computeClearsForMember } from './lib/bungieApi.js';
+import { fetchAggregateActivityStats, computeClearsForMember, computeClearsForCharacter } from './lib/bungieApi.js';
 
 export class MemberWorker {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.jobKeyPrefix = 'job:';
+    this.jobKeyPrefix = 'job:'; // job:<membershipId> or job:<membershipId>:<characterId>
   }
 
   async fetch(request) {
@@ -25,13 +25,16 @@ export class MemberWorker {
         }
         const membershipId = String(body.membershipId);
         const membershipType = Number(body.membershipType || 0);
+        const characterId = body.characterId ? String(body.characterId) : null;
         const opts = body.opts || {};
 
-        const jobKey = `${this.jobKeyPrefix}${membershipId}`;
+        // build job key: include characterId if present so per-character jobs are distinct
+        const jobKey = characterId ? `${this.jobKeyPrefix}${membershipId}:${characterId}` : `${this.jobKeyPrefix}${membershipId}`;
         const existing = (await this.state.storage.get(jobKey)) || {};
         const job = {
           membershipId,
           membershipType,
+          characterId,
           opts,
           state: existing.state || 'pending',
           progress: existing.progress || { characters: body.characters || [], nextCharacterIndex: 0 },
@@ -105,7 +108,7 @@ export class MemberWorker {
 
     // simple lock/guard against concurrent runners
     if (job.lockedAt && (Date.now() - new Date(job.lockedAt).getTime()) < 1000 * 60 * 10) {
-      console.log('[MemberWorker] jobRun: already locked recently for', job.membershipId);
+      console.log('[MemberWorker] jobRun: already locked recently for', job.membershipId, job.characterId || '');
       return;
     }
     job.lockedAt = new Date().toISOString();
@@ -113,48 +116,69 @@ export class MemberWorker {
     job.lastUpdatedAt = new Date().toISOString();
     await this.state.storage.put(jobKey, job);
 
-    console.log('[MemberWorker] START job', job.membershipId, 'opts=', job.opts || {});
+    console.log('[MemberWorker] START job', job.membershipId, job.characterId ? `char=${job.characterId}` : '(member-level)', 'opts=', job.opts || {});
 
     try {
       const membershipId = job.membershipId;
       const membershipType = Number(job.membershipType || 0);
+      const characterId = job.characterId || null;
       const opts = job.opts || {};
 
-      // Resolve characters: use profile as fallback (we do minimal here; computeClearsForMember also enumerates)
-      let characters = Array.isArray(job.progress?.characters) && job.progress.characters.length ? job.progress.characters : [];
-      if (!characters.length) {
+      // If characterId present -> run per-character compute and write character-level KV
+      if (characterId) {
+        const maxRunMs = Number(this.env.MEMBER_MAX_RUN_MS || opts.maxRunMs || 5000);
         try {
-          const profileUrl = `https://www.bungie.net/Platform/Destiny2/${membershipType}/Profile/${membershipId}/?components=200`;
-          const headers = { Accept: 'application/json' };
-          if (this.env.BUNGIE_API_KEY) headers['X-API-Key'] = this.env.BUNGIE_API_KEY;
-          const res = await fetch(profileUrl, { method: 'GET', headers });
-          if (res && res.ok) {
-            const json = await res.json().catch(() => null);
-            const chars = json?.Response?.characters?.data || {};
-            characters = Object.keys(chars);
-            console.log('[MemberWorker] fetched characters for', membershipId, 'count=', characters.length);
+          const result = await computeClearsForCharacter(membershipType, membershipId, characterId, this.env, { ...opts, maxPages: opts.maxPages, pageSize: opts.pageSize, timeoutMs: opts.timeoutMs, retries: opts.retries, backoffBaseMs: opts.backoffBaseMs });
+          const kvKey = `character_clears:${membershipId}:${characterId}`;
+          if (this.env.BUNGIE_STATS) {
+            try {
+              await this.env.BUNGIE_STATS.put(kvKey, JSON.stringify({ ...result, fetchedAt: new Date().toISOString() }));
+              console.log('[MemberWorker] wrote KV', kvKey, 'clears=', result.clears, 'mostRecent=', !!result.mostRecentActivity);
+            } catch (e) {
+              console.error('[MemberWorker] KV write failed for', kvKey, e && e.message ? e.message : e);
+              job.state = 'pending';
+              job.error = e && e.message ? e.message : String(e);
+              job.lastUpdatedAt = new Date().toISOString();
+              await this.state.storage.put(jobKey, job);
+              await this.state.storage.setAlarm(Date.now() + Number(this.env.MEMBER_RETRY_ALARM_MS || 15000));
+              return;
+            }
+          } else {
+            console.warn('[MemberWorker] no KV namespace bound; skipping character_clears write for', kvKey);
           }
-        } catch (e) {
-          console.warn('[MemberWorker] profile fetch failed for', membershipId, e && e.message ? e.message : e);
+
+          // mark done
+          job.state = 'done';
+          job.result = result;
+          job.completedAt = new Date().toISOString();
+          job.lastUpdatedAt = new Date().toISOString();
+          await this.state.storage.put(jobKey, job);
+          console.log('[MemberWorker] COMPLETED character job', membershipId, characterId);
+          return;
+        } catch (err) {
+          // handle deadline or other errors by scheduling retry
+          if (err && (err.message === 'deadline_exceeded' || err.name === 'deadline_exceeded')) {
+            console.warn('[MemberWorker] character compute exceeded budget, scheduling retry for', membershipId, characterId);
+            job.state = 'pending';
+            job.error = 'deadline_exceeded';
+            job.lastUpdatedAt = new Date().toISOString();
+            await this.state.storage.put(jobKey, job);
+            const retryMs = Number(this.env.MEMBER_RETRY_ALARM_MS || 15000);
+            try { await this.state.storage.setAlarm(Date.now() + retryMs); } catch (aErr) { console.warn('[MemberWorker] setAlarm failed', aErr && aErr.message ? aErr.message : aErr); }
+            return;
+          }
+          throw err;
         }
       }
 
-      if (characters.length && (!job.progress || !Array.isArray(job.progress.characters) || job.progress.characters.length === 0)) {
-        job.progress = job.progress || {};
-        job.progress.characters = characters;
-        job.progress.nextCharacterIndex = 0;
-        await this.state.storage.put(jobKey, job);
-      }
-
-      // Run computeClearsForMember (heavy operation)
-      console.log('[MemberWorker] computing clears for', membershipId);
+      // Otherwise, fallback to original per-member compute (legacy path)
+      console.log('[MemberWorker] computing clears for (member-level)', membershipId);
       const result = await computeClearsForMember({ membershipId, membershipType }, this.env, opts);
       console.log('[MemberWorker] computeClearsForMember DONE for', membershipId, 'clears=', result.clears, 'prophecy=', result.prophecyClears);
 
       // write per-member KV (member_clears:<membershipId>)
       if (this.env.BUNGIE_STATS) {
         const kvKey = `member_clears:${membershipId}`;
-        // include mostRecentActivity if present (computeClearsForMember now returns it)
         const out = { ...result, fetchedAt: new Date().toISOString() };
         try {
           await this.env.BUNGIE_STATS.put(kvKey, JSON.stringify(out));
@@ -182,7 +206,7 @@ export class MemberWorker {
       console.log('[MemberWorker] COMPLETED job', membershipId);
       return;
     } catch (err) {
-      console.error('[MemberWorker] jobRun fatal for', job.membershipId, err && err.message ? err.message : err);
+      console.error('[MemberWorker] jobRun fatal for', job.membershipId, job.characterId || '', err && err.message ? err.message : err);
       // mark pending and retry later
       try {
         const j = await this.state.storage.get(jobKey);

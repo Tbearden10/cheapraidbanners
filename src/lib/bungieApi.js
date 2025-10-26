@@ -37,6 +37,32 @@ for (const entry of ACTIVITY_REFERENCE_MAP) {
   }
 }
 
+// https://github.com/Tbearden10/dungeon-info-hub/blob/main/src/lib/bungieApi.js
+export async function fetchAggregateActivityStats(membershipType, membershipId, characterId, env = {}, opts = {}) {
+  if (!membershipType || !membershipId || !characterId) return null;
+  const template = `https://www.bungie.net/Platform/Destiny2/${encodeURIComponent(String(membershipType))}/Account/${encodeURIComponent(String(membershipId))}/Character/${encodeURIComponent(String(characterId))}/Stats/AggregateActivityStats/`;
+  const timeoutMs = Number(opts.timeoutMs || env.BUNGIE_PER_REQUEST_TIMEOUT_MS || 8000);
+  const retries = Number(opts.retries ?? (env.BUNGIE_FETCH_RETRIES ? Number(env.BUNGIE_FETCH_RETRIES) : 2));
+  const backoffBaseMs = Number(opts.backoffBaseMs ?? (env.BUNGIE_FETCH_BACKOFF_MS ? Number(env.BUNGIE_FETCH_BACKOFF_MS) : 500));
+  try {
+    // reuse fetchJson helper if present in the file; otherwise fetch + json
+    if (typeof fetchJson === 'function') {
+      const payload = await fetchJson(template, env, timeoutMs, retries, backoffBaseMs);
+      return payload || null;
+    } else {
+      const headers = { Accept: 'application/json' };
+      if (env && env.BUNGIE_API_KEY) headers['X-API-Key'] = env.BUNGIE_API_KEY;
+      const res = await fetchWithRetries(template, { method: 'GET', headers }, timeoutMs, retries, backoffBaseMs);
+      if (!res || !res.ok) return null;
+      const json = await res.json().catch(() => null);
+      return (json && json.Response) ? json.Response : null;
+    }
+  } catch (err) {
+    // bubble up for caller to handle / log
+    throw err;
+  }
+}
+
 export async function _fetchWithTimeout(url, opts = {}, timeoutMs = 8000) {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -85,84 +111,26 @@ export async function fetchWithRetries(url, opts = {}, timeoutMs = 8000, retries
   throw lastErr || new Error('fetchWithRetries: exhausted retries');
 }
 
-/**
- * fetchWithJson - wrapper to fetch and parse JSON with retries
- */
-async function fetchJson(url, env, timeoutMs = 8000, retries = 2, backoffBaseMs = 500) {
-  const headers = _makeHeaders(env);
-  const res = await fetchWithRetries(url, { method: 'GET', headers }, timeoutMs, retries, backoffBaseMs);
-  if (!res || !res.ok) return null;
-  const payload = await res.json().catch(() => null);
-  return payload && payload.Response ? payload.Response : null;
+function extractActivityReferenceId(activity) {
+  if (!activity) return null;
+  const ref = activity?.activityDetails?.referenceId ?? activity?.activityHash ?? activity?.referenceId ?? null;
+  return ref != null ? String(ref) : null;
 }
-
-/**
- * fetchAggregateActivityStats - uses the Account/Character AggregateActivityStats endpoint
- * Example URL:
- * https://www.bungie.net/Platform/Destiny2/{membershipType}/Account/{membershipId}/Character/{characterId}/Stats/AggregateActivityStats/
- * Returns the Response object or null on failure.
- */
-export async function fetchAggregateActivityStats(membershipType, membershipId, characterId, env = {}, opts = {}) {
-  if (!membershipType || !membershipId || !characterId) return null;
-  const template = `https://www.bungie.net/Platform/Destiny2/${encodeURIComponent(String(membershipType))}/Account/${encodeURIComponent(String(membershipId))}/Character/${encodeURIComponent(String(characterId))}/Stats/AggregateActivityStats/`;
-  const timeoutMs = Number(opts.timeoutMs || env.BUNGIE_PER_REQUEST_TIMEOUT_MS || 8000);
-  const retries = Number(opts.retries ?? (env.BUNGIE_FETCH_RETRIES ? Number(env.BUNGIE_FETCH_RETRIES) : 2));
-  const backoffBaseMs = Number(opts.backoffBaseMs ?? (env.BUNGIE_FETCH_BACKOFF_MS ? Number(env.BUNGIE_FETCH_BACKOFF_MS) : 500));
-  try {
-    const payload = await fetchJson(template, env, timeoutMs, retries, backoffBaseMs);
-    return payload || null;
-  } catch (err) {
-    // bubble up for caller to handle / log
-    throw err;
-  }
-}
-
-/**
- * fetchStatsDirect - preferred way to get character list + deleted flags (matches frontend flow)
- * Returns { characters: [{ characterId, deleted? }] }
- */
-export async function fetchStatsDirect(membershipType, membershipId, env, timeoutMs = 8000) {
-  if (!membershipType || !membershipId) return { characters: [] };
-  const url = `https://www.bungie.net/Platform/Destiny2/${membershipType}/Account/${encodeURIComponent(membershipId)}/Stats/`;
-  const headers = _makeHeaders(env);
-  try {
-    const res = await fetchWithRetries(url, { method: 'GET', headers }, timeoutMs, 2, 500);
-    if (!res || !res.ok) return { characters: [] };
-    const payload = await res.json().catch(() => null);
-    if (!payload || !payload.Response) return { characters: [] };
-
-    const rawChars = payload.Response?.characters ?? null;
-    let allChars = [];
-    if (Array.isArray(rawChars)) {
-      allChars = rawChars.map((c) => ({ characterId: String(c.characterId), deleted: !!c.deleted }));
-    } else if (rawChars && typeof rawChars === 'object') {
-      allChars = Object.entries(rawChars).map(([cid, ch]) => {
-        const obj = ch || {};
-        return { characterId: String(cid), deleted: !!obj.deleted };
-      });
-    }
-    return { characters: allChars };
-  } catch (err) {
-    return { characters: [] };
-  }
-}
-
-/**
- * fetchProfile - fallback for character enumeration if Stats doesn't return usable info.
- * returns { ok:true, payload } on success, { ok:false } on failure.
- */
-export async function fetchProfile(membershipType, membershipId, env, timeoutMs = 8000) {
-  if (!membershipType || !membershipId) return { ok: false };
-  const url = `https://www.bungie.net/Platform/Destiny2/${membershipType}/Profile/${membershipId}?components=100,200`;
-  const headers = _makeHeaders(env);
-  try {
-    const res = await fetchWithRetries(url, { method: 'GET', headers }, timeoutMs, 2, 500);
-    if (!res || !res.ok) return { ok: false, status: res ? res.status : 'no_response' };
-    const payload = await res.json().catch(() => null);
-    return { ok: true, payload };
-  } catch (err) {
-    return { ok: false, error: err && (err.message || err.name) ? (err.message || err.name) : String(err) };
-  }
+function activityIsCompleted(activity) {
+  if (!activity) return false;
+  const completed =
+    activity?.values?.completed?.basic?.value ??
+    activity?.values?.completed?.value ??
+    activity?.isCompleted ??
+    activity?.completed ??
+    null;
+  if (completed === 1 || completed === true) return true;
+  const success =
+    activity?.values?.success?.basic?.value ??
+    activity?.values?.success?.value ??
+    null;
+  if (success === 1 || success === true) return true;
+  return false;
 }
 
 /**
@@ -187,26 +155,100 @@ async function fetchActivityPage(membershipType, membershipId, characterId, env,
   }
 }
 
-function extractActivityReferenceId(activity) {
-  if (!activity) return null;
-  const ref = activity?.activityDetails?.referenceId ?? activity?.activityHash ?? activity?.referenceId ?? null;
-  return ref != null ? String(ref) : null;
-}
-function activityIsCompleted(activity) {
-  if (!activity) return false;
-  const completed =
-    activity?.values?.completed?.basic?.value ??
-    activity?.values?.completed?.value ??
-    activity?.isCompleted ??
-    activity?.completed ??
-    null;
-  if (completed === 1 || completed === true) return true;
-  const success =
-    activity?.values?.success?.basic?.value ??
-    activity?.values?.success?.value ??
-    null;
-  if (success === 1 || success === true) return true;
-  return false;
+/**
+ * computeClearsForCharacter
+ * Stream pages for a single character and return { membershipId, membershipType, characterId, clears, prophecyClears, lastActivityAt, mostRecentActivity }.
+ * This is designed to be small/fast: it only processes one character's activity history.
+ *
+ * opts:
+ *  - pageSize, maxPages, timeoutMs, retries, backoffBaseMs
+ *  - mode(s) will be 'dungeon' and 'story' filtered by dungeon reference set
+ */
+export async function computeClearsForCharacter(membershipType, membershipId, characterId, env = {}, opts = {}) {
+  const out = { membershipId: String(membershipId || ''), membershipType: Number(membershipType || 0), characterId: String(characterId || ''), clears: 0, prophecyClears: 0, lastActivityAt: null, mostRecentActivity: null };
+
+  if (!membershipId || !membershipType || !characterId) return out;
+
+  const pageSize = Number(opts.pageSize || 250);
+  const maxPages = Number(opts.maxPages || (env.BUNGIE_ACTIVITY_MAX_PAGES ? Number(env.BUNGIE_ACTIVITY_MAX_PAGES) : 1000));
+  const timeoutMs = Number(opts.timeoutMs || env.BUNGIE_PER_REQUEST_TIMEOUT_MS || 8000);
+  const retries = Number(opts.retries ?? (env.BUNGIE_FETCH_RETRIES ? Number(env.BUNGIE_FETCH_RETRIES) : 2));
+  const backoffBaseMs = Number(opts.backoffBaseMs ?? (env.BUNGIE_FETCH_BACKOFF_MS ? Number(env.BUNGIE_FETCH_BACKOFF_MS) : 500));
+
+  let latestTs = 0;
+  let clears = 0;
+  let prophecyClears = 0;
+  let mostRecentActivity = null;
+
+  const ALL_DUNGEON_REFERENCE_IDS = DUNGEON_REFERENCE_SET;
+
+  const processActivities = (activities) => {
+    if (!Array.isArray(activities)) return;
+    for (const act of activities) {
+      try {
+        const ref = extractActivityReferenceId(act);
+        if (!ref) continue;
+        if (!ALL_DUNGEON_REFERENCE_IDS.has(String(ref))) continue;
+        if (!activityIsCompleted(act)) continue;
+        // increase counts
+        clears += 1;
+        if (PROPHECY_REFERENCE_SET.has(String(ref))) prophecyClears += 1;
+        // track latest ts
+        const period = act?.period ?? act?.periodStart ?? null;
+        if (period) {
+          const t = Date.parse(period);
+          if (!Number.isNaN(t) && t > latestTs) latestTs = t;
+        }
+        // track mostRecentActivity for this character if it has instanceId
+        const inst = act?.activityDetails?.instanceId ?? act?.activityDetails?.instanceIdHash ?? null;
+        if (inst && period) {
+          const t = Date.parse(period) || 0;
+          if (!mostRecentActivity || t > (Date.parse(mostRecentActivity.period || '') || 0)) {
+            mostRecentActivity = {
+              instanceId: String(inst),
+              period,
+              activityHash: String(ref),
+              characterId: String(characterId),
+              raw: {
+                referenceId: ref,
+                instanceId: inst,
+                period,
+                values: act?.values ?? null
+              }
+            };
+          }
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+  };
+
+  // dungeon mode pages
+  let page = 0;
+  while (page < maxPages) {
+    const activities = await fetchActivityPage(membershipType, membershipId, characterId, env, { page, pageSize, mode: 'dungeon', timeoutMs, retries, backoffBaseMs });
+    if (!activities || activities.length === 0) break;
+    processActivities(activities);
+    if (activities.length < pageSize) break;
+    page += 1;
+  }
+
+  // story mode pages (filtered to dungeon reference ids)
+  page = 0;
+  while (page < maxPages) {
+    const activities = await fetchActivityPage(membershipType, membershipId, characterId, env, { page, pageSize, mode: 'story', timeoutMs, retries, backoffBaseMs });
+    if (!activities || activities.length === 0) break;
+    processActivities(activities);
+    if (activities.length < pageSize) break;
+    page += 1;
+  }
+
+  out.clears = clears;
+  out.prophecyClears = prophecyClears;
+  out.lastActivityAt = latestTs ? new Date(latestTs).toISOString() : null;
+  out.mostRecentActivity = mostRecentActivity || null;
+  return out;
 }
 
 /**
