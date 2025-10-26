@@ -369,7 +369,7 @@
       const online = fresh.data.members.some(m => !!(m.isOnline ?? m.is_online ?? m.online));
       if (online) {
         // request a fresh stats run (server will return cached immediately and start background work)
-        await fetchJson(`${STATS_URL}?fresh=1`, 7000).catch(() => {});
+        await fetchJson(`${STATS_URL}?fresh=1&sync=1`, 120000, { headers: { 'x-wait': '1' } }).catch(() => {});
         // poll cached snapshot until it changes (short timeout)
         const baselineResp = await fetchJson(`${STATS_URL}?cached=1`, 4000);
         const baseline = baselineResp.ok && baselineResp.data ? baselineResp.data : null;

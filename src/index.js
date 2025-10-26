@@ -1,4 +1,4 @@
-// Entrypoint worker: HTTP endpoints for frontend/admin and scheduled cron.
+// Entrypoint worker: HTTP endpoints for frontend & admin and scheduled cron.
 // Exports Durable Objects used by wrangler.
 export { GlobalStats } from './global_stats.js';
 export { MemberWorker } from './member_worker.js';
@@ -80,8 +80,7 @@ async function buildPartialSnapshotFromMemberKV(env) {
         // skip malformed
       }
     }
-    // build overall mostRecentClanActivity using same logic as GlobalStats.aggregate (simple)
-    // For simplicity here we return partial perMember; GlobalStats DO will build canonical snapshot.
+    // Return a compact partial aggregate
     return {
       fetchedAt: new Date().toISOString(),
       source: 'partial-aggregate',
@@ -129,13 +128,11 @@ async function fetchPgcrAndCache(env, instanceId, cacheTtlSec = 86400) {
   const payload = await res.json().catch(() => null);
   if (!payload) throw new Error('invalid_pgcr_json');
 
-  // Normalize a small subset for frontend (avoid storing huge blob if desired) — but store full payload too
   const normalized = {
     fetchedAt: new Date().toISOString(),
     instanceId,
     raw: payload,
-    // try to derive some friendly fields
-    period: payload?.Response?.period ?? payload?.Response?.period ?? null,
+    period: payload?.Response?.period ?? null,
     activityHash: payload?.Response?.activityDetails?.referenceId ?? payload?.Response?.activityDetails?.activityHash ?? null,
     mode: payload?.Response?.activityDetails?.mode ?? null,
     activityName: payload?.Response?.activityDetails?.name ?? null,
@@ -147,7 +144,7 @@ async function fetchPgcrAndCache(env, instanceId, cacheTtlSec = 86400) {
     })) : []
   };
 
-  // cache full payload in KV to allow more detailed inspection later
+  // cache to KV
   if (env.BUNGIE_STATS) {
     try {
       await env.BUNGIE_STATS.put(cacheKey, JSON.stringify(normalized), { expirationTtl: Number(cacheTtlSec) });
@@ -159,6 +156,7 @@ async function fetchPgcrAndCache(env, instanceId, cacheTtlSec = 86400) {
   return normalized;
 }
 
+// read cached members (small helper used by members endpoint)
 async function readCachedMembersFromKV(env) {
   if (!env.BUNGIE_STATS) return null;
   try {
@@ -189,55 +187,45 @@ export default {
     const path = url.pathname;
     const search = url.searchParams;
 
-    // GET /members
+    // GET /members (cached-first, then unconditional background refresh; sync if requested)
     if (request.method === 'GET' && path === '/members') {
       const wantFresh = search.has('fresh');
       const wantCached = search.has('cached') || (!wantFresh && !!env.BUNGIE_STATS);
       const wait = shouldWait(request.url, request);
 
-      // Always attempt to read cached members first to return something quickly for UI.
       const cached = await readCachedMembersFromKV(env);
 
-      // Fire an unconditional background refresh of members (user requested that "after checks from bungie no matter what too")
-      // If caller requested synchronous wait, we'll forward and await below instead.
       try {
         const id = env.GLOBAL_STATS.idFromName('global');
         const stub = env.GLOBAL_STATS.get(id);
         if (!wait && cached && Array.isArray(cached.members)) {
-          // Background refresh (fire-and-forget) but always attempted
+          // background update-members
           stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
             .then(async (r) => { try { const t = await r.text().catch(() => null); console.log('[index] background update-members', r.status, (t||'').slice(0,200)); } catch(e){} })
             .catch(err => console.error('[index] bg update-members failed', err));
-          // Return cached right away, annotating that a background refresh was kicked off.
           const out = { fetchedAt: cached.fetchedAt, members: cached.members, memberCount: cached.memberCount, _backgroundRefresh: true };
           return jsonResponse(out);
         }
 
-        // If caller explicitly asked for fresh OR there's no cached data, forward to DO and (optionally) wait.
         if (wait) {
-          // synchronous forwarding to DO; this will run update-members and return members array.
           const res = await stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
           const text = await res.text().catch(() => null);
-          // If DO returned JSON members, pass it through; otherwise return what it returned.
           try {
             return new Response(text || JSON.stringify({ ok: false }), { status: res.status, headers: { 'Content-Type': 'application/json' }});
           } catch (e) {
             return jsonResponse({ ok: false, reason: 'do_response_parse_failed', error: String(e) }, 502);
           }
         } else {
-          // No cached data but not waiting: fire-and-forget and return accepted
           if (!cached || !Array.isArray(cached.members) || cached.members.length === 0) {
             stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
               .then(async (r) => { try { const t = await r.text().catch(() => null); console.log('[index] background update-members (no-cached)', r.status, (t||'').slice(0,200)); } catch(e){} })
               .catch(err => console.error('[index] bg update-members failed', err));
             return jsonResponse({ ok: true, job: 'accepted', message: 'Members refresh dispatched' }, 202);
           }
-          // This branch is unlikely because earlier we returned cached if present; kept for safety.
           return jsonResponse({ fetchedAt: cached.fetchedAt, members: cached.members, memberCount: cached.memberCount, _backgroundRefresh: true });
         }
       } catch (e) {
         console.error('[index] update-members forward error', e);
-        // If forwarding to DO failed, still return cached if available; otherwise error.
         if (cached && Array.isArray(cached.members)) {
           const out = { fetchedAt: cached.fetchedAt, members: cached.members, memberCount: cached.memberCount, _backgroundRefresh: false, _refreshError: String(e) };
           return jsonResponse(out);
@@ -247,15 +235,13 @@ export default {
     }
 
     // GET /stats
-    // Behavior:
-    // - If ?cached=1 present -> return cached snapshot if valid OR partial aggregated snapshot -> DO NOT dispatch background compute here.
-    // - If ?fresh=1 present -> return cached/partial immediately (annotated) and fire background compute (non-blocking).
-    // - If neither param present -> behave like cached (no dispatch).
+    // - cached-only returns cached or partial
+    // - fresh with sync (x-wait or sync=1) does: fresh-members (sync) -> if online users then sync update-clears (waitTimeout configurable) -> return snapshot
+    // - fresh without wait behaves as before (cached/partial + background update)
     if (request.method === 'GET' && path === '/stats') {
       const wantCached = search.has('cached');
       const wantFresh = search.has('fresh');
 
-      // Helper: read cached snapshot if valid
       const readCachedSnapshot = async () => {
         if (!env.BUNGIE_STATS) return null;
         try {
@@ -263,9 +249,7 @@ export default {
           if (!raw) return null;
           let parsed = null;
           try { parsed = JSON.parse(raw); } catch (e) { parsed = null; }
-          // Validate parsed shape
           if (parsed && (typeof parsed.clears !== 'undefined' || Array.isArray(parsed.perMember))) return parsed;
-          // invalid shape stored in clears_snapshot
           console.warn('[index] clears_snapshot exists but does not look like a valid snapshot');
           return null;
         } catch (e) {
@@ -274,7 +258,6 @@ export default {
         }
       };
 
-      // If caller explicitly requested cached-only, return cached or partial and DO NOT dispatch
       if (wantCached && !wantFresh) {
         const cached = await readCachedSnapshot();
         if (cached) return jsonResponse(cached);
@@ -283,11 +266,95 @@ export default {
         return jsonResponse({ ok: false, reason: 'no_snapshot' }, 404);
       }
 
-      // If caller requested fresh, return cached/partial immediately and trigger background update
       if (wantFresh) {
         const cached = await readCachedSnapshot();
+
+        const clientWait = shouldWait(request.url, request);
+        const forceSync = (env.FORCE_STATS_FRESH_SYNC && String(env.FORCE_STATS_FRESH_SYNC) === '1');
+
+        // If client requested synchronous fresh stats or server forced it, do two-step:
+        // 1) fetch fresh members synchronously (update-members)
+        // 2) if any online users, forward synchronous update-clears that will try to produce a fresh snapshot
+        if (clientWait || forceSync) {
+          const id = env.GLOBAL_STATS.idFromName('global');
+          const stub = env.GLOBAL_STATS.get(id);
+
+          // 1) Synchronously refresh members (so the DO knows current roster and we detect online members)
+          let freshMembers = null;
+          try {
+            const memRes = await stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+            const text = await memRes.text().catch(() => null);
+            try { freshMembers = text ? JSON.parse(text) : null; } catch (e) { freshMembers = null; }
+          } catch (e) {
+            console.warn('[index] sync update-members failed', e && e.message ? e.message : e);
+            // fall through and try to use cached members if available
+          }
+
+          // Determine online users from the freshMembers result (or cached)
+          let membersList = (freshMembers && Array.isArray(freshMembers.members)) ? freshMembers.members : (cached && Array.isArray(cached.perMember) ? cached.perMember : null);
+          // If GlobalStats returned top-level members array (different shapes), normalize
+          if (!membersList && freshMembers && Array.isArray(freshMembers)) membersList = freshMembers;
+          if (!membersList && cached && Array.isArray(cached.perMember)) {
+            // cached.perMember is aggregated items; map to shallow member entries (membershipId only)
+            membersList = cached.perMember.map(pm => ({ membershipId: pm.membershipId, membershipType: pm.membershipType || 0, isOnline: false }));
+          }
+
+          // Compute online count
+          let onlineMembershipIds = [];
+          try {
+            if (Array.isArray(membersList)) {
+              for (const m of membersList) {
+                if (m && (m.isOnline || m.is_online || m.online)) {
+                  if (m.membershipId) onlineMembershipIds.push(String(m.membershipId));
+                  else if (m.membership_id) onlineMembershipIds.push(String(m.membership_id));
+                }
+              }
+            }
+          } catch (e) { onlineMembershipIds = []; }
+
+          // If any online users, forward synchronous update-clears and wait for the aggregated snapshot
+          if (onlineMembershipIds.length > 0) {
+            // respect configured caps
+            const waitMs = Number(env.STATS_SYNC_WAIT_MS ? Number(env.STATS_SYNC_WAIT_MS) : 120000);
+            const maxUsers = Number(env.STATS_MAX_SYNC_USER_LIMIT ? Number(env.STATS_MAX_SYNC_USER_LIMIT) : 200);
+            const userLimit = Math.min(maxUsers, onlineMembershipIds.length || maxUsers);
+
+            // We'll request update-clears with a userLimit equal to online count OR let GlobalStats handle the dispatch.
+            // NOTE: GlobalStats currently slices by member order; if you want it to process particular membershipIds,
+            // we should extend GlobalStats to accept membershipIds. For now we use userLimit to prefer faster runs.
+            try {
+              const payload = JSON.stringify({ userLimit: userLimit || undefined, waitForCompletion: true, waitTimeoutMs: waitMs, opts: { includeDeletedCharacters: true } });
+              const res = await stub.fetch('https://globalstats.local/update-clears', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload });
+              const text = await res.text().catch(() => null);
+              try {
+                return new Response(text || JSON.stringify({ ok: false }), { status: res.status, headers: { 'Content-Type': 'application/json' }});
+              } catch (e) {
+                return jsonResponse({ ok: false, reason: 'do_response_parse_failed', error: String(e) }, 502);
+              }
+            } catch (e) {
+              console.error('[index] sync update-clears forward error', e && e.message ? e.message : e);
+              const partial = await buildPartialSnapshotFromMemberKV(env);
+              if (partial) {
+                partial._backgroundRefresh = true;
+                partial._refreshError = String(e);
+                return jsonResponse(partial);
+              }
+              return jsonResponse({ ok: false, reason: 'do_forward_failed', error: String(e) }, 500);
+            }
+          }
+
+          // No online users detected — return cached or partial (but we already refreshed members above)
+          if (cached) {
+            cached._backgroundRefresh = false;
+            return jsonResponse(cached);
+          }
+          const partial = await buildPartialSnapshotFromMemberKV(env);
+          if (partial) return jsonResponse(partial);
+          return jsonResponse({ ok: true, message: 'no_online_members' }, 200);
+        }
+
+        // Non-waiting path (existing behavior): return cached/partial immediately and trigger background update
         if (cached) {
-          // trigger background update (non-blocking)
           (async () => {
             try {
               const id = env.GLOBAL_STATS.idFromName('global');
@@ -298,7 +365,7 @@ export default {
           cached._backgroundRefresh = true;
           return jsonResponse(cached);
         }
-        // no cached snapshot: try partial
+
         const partial = await buildPartialSnapshotFromMemberKV(env);
         if (partial) {
           (async () => {
@@ -312,7 +379,6 @@ export default {
           return jsonResponse(partial);
         }
 
-        // no cached or partial: trigger background update and return accepted
         try {
           const id = env.GLOBAL_STATS.idFromName('global');
           const stub = env.GLOBAL_STATS.get(id);
@@ -327,10 +393,10 @@ export default {
       }
 
       // Default (no params): behave like cached read (do not dispatch)
-      const cached = await readCachedSnapshot();
-      if (cached) return jsonResponse(cached);
-      const partial = await buildPartialSnapshotFromMemberKV(env);
-      if (partial) return jsonResponse(partial);
+      const cached2 = await readCachedSnapshot();
+      if (cached2) return jsonResponse(cached2);
+      const partial2 = await buildPartialSnapshotFromMemberKV(env);
+      if (partial2) return jsonResponse(partial2);
       return jsonResponse({ ok: false, reason: 'no_snapshot' }, 404);
     }
 
