@@ -1,302 +1,295 @@
-// Entrypoint (simplified): cached reads + single "fresh members" flow that diffs KV and triggers clears jobs.
-// Changes: members?fresh=1 now returns the fresh roster (synchronous). stats?fresh=1 only starts the job and returns 202 immediately.
-//
-// Exports DO bindings
-export { GlobalStats } from './global_stats.js';
-export { MemberWorker } from './member_worker.js';
+// File: index.js
+// Main Cloudflare Worker - Handles HTTP requests and cron triggers
 
-function jsonResponse(obj, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' }});
-}
-
-function shouldWait(url, request) {
-  try {
-    const u = new URL(url);
-    if (u.searchParams.get('sync') === '1') return true;
-  } catch (e) {}
-  const h = request.headers.get('x-wait');
-  return !!(h && (h === '1' || h.toLowerCase() === 'true'));
-}
-
-async function readCachedMembersFromKV(env) {
-  if (!env.BUNGIE_STATS) return null;
-  try {
-    const listed = await env.BUNGIE_STATS.list({ prefix: 'member:' });
-    const keys = (listed && listed.keys) ? listed.keys.map(k => k.name) : [];
-    const members = [];
-    for (const key of keys) {
-      try {
-        const raw = await env.BUNGIE_STATS.get(key);
-        if (!raw) continue;
-        members.push(JSON.parse(raw));
-      } catch (e) { /* skip malformed */ }
-    }
-    return { members, memberCount: members.length, fetchedAt: new Date().toISOString() };
-  } catch (e) {
-    console.warn('[index] readCachedMembersFromKV failed', e && e.message ? e.message : e);
-    return null;
-  }
-}
-
-async function writeMemberKVChanges(env, freshMembers) {
-  if (!env.BUNGIE_STATS) return { added: 0, updated: 0, removed: 0 };
-
-  const freshMap = new Map();
-  for (const m of (freshMembers || [])) freshMap.set(String(m.membershipId), m);
-
-  const listed = await env.BUNGIE_STATS.list({ prefix: 'member:' });
-  const existingKeys = (listed && listed.keys) ? listed.keys.map(k => k.name) : [];
-  const existingMap = new Map();
-  for (const key of existingKeys) {
-    const id = key.replace(/^member:/, '');
-    try {
-      const raw = await env.BUNGIE_STATS.get(key);
-      if (!raw) continue;
-      existingMap.set(id, JSON.parse(raw));
-    } catch (e) { /* ignore */ }
-  }
-
-  const added = [];
-  const updated = [];
-  const removed = [];
-
-  for (const [id, m] of freshMap.entries()) {
-    const small = {
-      membershipId: String(m.membershipId),
-      membershipType: Number(m.membershipType || m.membership_type || 0),
-      supplementalDisplayName: m.supplementalDisplayName ?? m.displayName ?? m.display_name ?? '',
-      isOnline: !!(m.isOnline ?? m.online ?? m.is_online),
-      joinDate: m.joinDate ?? m.join_date ?? null,
-      memberType: m.memberType ?? m.member_type ?? null,
-      emblemPath: m.emblemPath ?? m.emblemBackgroundPath ?? m.emblem_url ?? null,
-      emblemBackgroundPath: m.emblemBackgroundPath ?? null,
-      emblemHash: m.emblemHash ?? null
-    };
-
-    const prev = existingMap.get(id);
-    const keyName = `member:${id}`;
-    if (!prev) {
-      try {
-        await env.BUNGIE_STATS.put(keyName, JSON.stringify(small));
-        added.push(id);
-      } catch (e) {
-        console.warn('[index] failed writing new member KV', keyName, e && e.message ? e.message : e);
-      }
-    } else {
-      const changed = (
-        prev.supplementalDisplayName !== small.supplementalDisplayName ||
-        prev.emblemPath !== small.emblemPath ||
-        prev.joinDate !== small.joinDate ||
-        prev.isOnline !== small.isOnline
-      );
-      if (changed) {
-        try {
-          await env.BUNGIE_STATS.put(keyName, JSON.stringify(small));
-          updated.push(id);
-        } catch (e) {
-          console.warn('[index] failed updating member KV', keyName, e && e.message ? e.message : e);
-        }
-      }
-    }
-  }
-
-  for (const id of existingMap.keys()) {
-    if (!freshMap.has(id)) {
-      const keyName = `member:${id}`;
-      try {
-        await env.BUNGIE_STATS.delete(keyName);
-        removed.push(id);
-      } catch (e) {
-        console.warn('[index] failed deleting stale member key', keyName, e && e.message ? e.message : e);
-      }
-    }
-  }
-
-  return { added: added.length, updated: updated.length, removed: removed.length, addedIds: added, updatedIds: updated, removedIds: removed };
-}
-
-async function readCachedSnapshot(env) {
-  if (!env.BUNGIE_STATS) return null;
-  try {
-    const raw = await env.BUNGIE_STATS.get('clears_snapshot');
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch (e) {
-    console.warn('[index] readCachedSnapshot failed', e && e.message ? e.message : e);
-    return null;
-  }
-}
+export { StatsCoordinator } from './stats_coordinator.js';
+import { fetchEnrichedPGCR } from './enhanced_pgcr.js';
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
-    const search = url.searchParams;
 
-    // GET /members
-    if (request.method === 'GET' && path === '/members') {
-      const wantFresh = search.has('fresh');
-      const wantCached = search.has('cached') || (!wantFresh && !!env.BUNGIE_STATS);
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
 
-      if (wantCached && !wantFresh) {
-        const cached = await readCachedMembersFromKV(env);
-        if (cached) return jsonResponse(cached);
-        return jsonResponse({ ok: false, reason: 'no_cached_members' }, 404);
-      }
-
-      // If client requested fresh: return fresh roster (synchronously)
-      if (wantFresh) {
-        const id = env.GLOBAL_STATS.idFromName('global');
-        const stub = env.GLOBAL_STATS.get(id);
-
-        // 1) ask DO for fresh roster (synchronous) and return it
-        let freshMembers = [];
-        try {
-          const res = await stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-          const text = await res.text().catch(() => null);
-          let parsed = null;
-          try { parsed = text ? JSON.parse(text) : null; } catch (e) { parsed = null; }
-          if (parsed && Array.isArray(parsed.members)) freshMembers = parsed.members;
-          else if (Array.isArray(parsed)) freshMembers = parsed;
-          else freshMembers = Array.isArray(parsed) ? parsed : (parsed && parsed.members ? parsed.members : []);
-        } catch (e) {
-          console.warn('[index] update-members DO call failed', e && e.message ? e.message : e);
-          // fall back to cached if available
-          const cached = await readCachedMembersFromKV(env);
-          if (cached) return jsonResponse({ ok: true, members: cached.members, note: 'fresh_failed_returned_cached' });
-          return jsonResponse({ ok: false, reason: 'members_fetch_failed', error: String(e) }, 502);
-        }
-
-        // 2) diff vs KV and write changes
-        const diffResult = await writeMemberKVChanges(env, freshMembers);
-
-        // 3) trigger clears processing for online members in background (do not wait)
-        const onlineMembers = (Array.isArray(freshMembers) ? freshMembers.filter(m => !!(m.isOnline ?? m.is_online ?? m.online)) : []).map(m => ({
-          membershipId: String(m.membershipId ?? m.membership_id ?? ''),
-          membershipType: Number(m.membershipType ?? m.membership_type ?? 0)
-        })).filter(m => m.membershipId);
-
-        const maxUsers = Number(env.STATS_MAX_SYNC_USER_LIMIT ? Number(env.STATS_MAX_SYNC_USER_LIMIT) : 200);
-        const toProcess = onlineMembers.slice(0, maxUsers);
-
-        try {
-          if (toProcess.length > 0) {
-            const payloadObj = { membershipIds: toProcess, waitForCompletion: false, opts: { includeDeletedCharacters: true } };
-            // fire-and-forget background clears job; don't await
-            stub.fetch('https://globalstats.local/update-clears', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payloadObj) }).catch((e) => {
-              console.warn('[index] background update-clears dispatch failed', e && e.message ? e.message : e);
-            });
-          }
-        } catch (e) {
-          console.warn('[index] failed dispatching background clears job', e && e.message ? e.message : e);
-        }
-
-        // 4) return fresh members and diff result immediately
-        return jsonResponse({ ok: true, members: freshMembers, diff: diffResult, clearsDispatchedFor: toProcess.length });
-      }
-
-      // default cached path
-      const cached = await readCachedMembersFromKV(env);
-      if (cached) return jsonResponse(cached);
-      return jsonResponse({ ok: false, reason: 'no_members' }, 404);
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
     }
 
-    // GET /stats
-    if (request.method === 'GET' && path === '/stats') {
-      const wantCached = search.has('cached');
-      const wantFresh = search.has('fresh');
+    try {
+      // GET /members - Returns cached member list
+      if (path === '/members' && request.method === 'GET') {
+        const members = await env.BUNGIE_STATS.get('members', 'json');
+        
+        if (!members) {
+          await triggerMembersRefresh(env);
+          return jsonResponse({ 
+            members: [], 
+            fetchedAt: null, 
+            loading: true 
+          }, 202, corsHeaders);
+        }
 
-      if (wantCached && !wantFresh) {
-        const snap = await readCachedSnapshot(env);
-        if (snap) return jsonResponse(snap);
-        return jsonResponse({ ok: false, reason: 'no_snapshot' }, 404);
+        return jsonResponse(members, 200, corsHeaders);
       }
 
-      // For stats?fresh=1: only start the job and return 202 immediately (do not wait)
-      if (wantFresh) {
-        const id = env.GLOBAL_STATS.idFromName('global');
-        const stub = env.GLOBAL_STATS.get(id);
+      // GET /stats - Returns cached stats snapshot
+      if (path === '/stats' && request.method === 'GET') {
+        const stats = await env.BUNGIE_STATS.get('stats_snapshot', 'json');
+        
+        if (!stats) {
+          await triggerStatsRefresh(env);
+          return jsonResponse({ 
+            raidClears: 0, 
+            dungeonClears: 0, 
+            totalPlaytimeSeconds: 0,
+            memberCount: 0,
+            fetchedAt: null,
+            loading: true 
+          }, 202, corsHeaders);
+        }
+
+        return jsonResponse(stats, 200, corsHeaders);
+      }
+
+      // GET /recent-clears - Fetch recent activities for clan members
+      if (path === '/recent-clears' && request.method === 'GET') {
+        try {
+          const count = parseInt(url.searchParams.get('count')) || 30;
+          const maxCount = Math.min(count, 30);
+
+
+          console.log('[COUNT]:')
+          
+          const recentClears = await fetchRecentClanClears(maxCount, env);
+          return jsonResponse(recentClears, 200, corsHeaders);
+        } catch (error) {
+          console.error('[RecentClears] Fetch error:', error);
+          return jsonResponse({ 
+            error: error.message || 'Failed to fetch recent clears',
+            clears: []
+          }, 500, corsHeaders);
+        }
+      }
+
+      // GET /pgcr - Get enhanced activity details
+      if (path === '/pgcr' && request.method === 'GET') {
+        const instanceId = url.searchParams.get('instanceId');
+        if (!instanceId) {
+          return jsonResponse({ error: 'Missing instanceId' }, 400, corsHeaders);
+        }
 
         try {
-          const payloadObj = { opts: { includeDeletedCharacters: true } };
-          // Always fire-and-forget; return accepted immediately.
-          stub.fetch('https://globalstats.local/update-clears', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payloadObj) }).catch((e) => {
-            console.warn('[index] background update-clears dispatch failed', e && e.message ? e.message : e);
-          });
-          return jsonResponse({ ok: true, job: 'accepted', message: 'Clears job dispatched' }, 202);
-        } catch (e) {
-          console.warn('[index] update-clears dispatch error', e && e.message ? e.message : e);
-          // If dispatch itself failed, still return accepted (best-effort) but include error
-          return jsonResponse({ ok: false, reason: 'dispatch_failed', error: String(e) }, 500);
+          const enrichedPGCR = await fetchEnrichedPGCRWithCache(instanceId, env);
+          return jsonResponse(enrichedPGCR, 200, corsHeaders);
+        } catch (error) {
+          console.error('[PGCR] Fetch error:', error);
+          return jsonResponse({ 
+            error: error.message || 'Failed to fetch PGCR' 
+          }, 500, corsHeaders);
         }
       }
 
-      // default
-      const snap = await readCachedSnapshot(env);
-      if (snap) return jsonResponse(snap);
-      return jsonResponse({ ok: false, reason: 'no_snapshot' }, 404);
-    }
+      // POST /admin/refresh - Manual refresh trigger
+      if (path === '/admin/refresh' && request.method === 'POST') {
+        const token = request.headers.get('x-admin-token');
+        if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
+          return jsonResponse({ error: 'Unauthorized' }, 401, corsHeaders);
+        }
 
-    // GET /pgcr unchanged
-    if (request.method === 'GET' && path === '/pgcr') {
-      const instanceId = url.searchParams.get('instanceId') || null;
-      if (!instanceId) return jsonResponse({ ok: false, error: 'missing_instanceId' }, 400);
-      try {
-        const apiKey = env.BUNGIE_API_KEY || '';
-        const pgcrUrl = `https://www.bungie.net/Platform/Destiny2/Stats/PostGameCarnageReport/${encodeURIComponent(instanceId)}/`;
-        const headers = { Accept: 'application/json' };
-        if (apiKey) headers['X-API-Key'] = apiKey;
-        const res = await fetch(pgcrUrl, { method: 'GET', headers });
-        if (!res || !res.ok) {
-          const text = await res.text().catch(()=>null);
-          return jsonResponse({ ok: false, error: `bungie ${res ? res.status : 'no_resp'} ${text ? text.slice(0,200) : ''}` }, 502);
+        const body = await request.json().catch(() => ({}));
+        const type = body.type || 'all';
+
+        if (type === 'members' || type === 'all') {
+          await triggerMembersRefresh(env);
         }
-        const payload = await res.json().catch(()=>null);
-        if (!payload) return jsonResponse({ ok: false, error: 'invalid_pgcr' }, 502);
-        const normalized = {
-          fetchedAt: new Date().toISOString(),
-          instanceId,
-          raw: payload,
-          period: payload?.Response?.period ?? null,
-          activityName: payload?.Response?.activityDetails?.name ?? null,
-          mode: payload?.Response?.activityDetails?.mode ?? null,
-          entries: Array.isArray(payload?.Response?.entries) ? payload.Response.entries.map(e => ({ characterId: e.characterId ?? e.character_id ?? null, membershipId: e.player?.destinyUserInfo?.membershipId ?? null, displayName: e.player?.destinyUserInfo?.displayName ?? null, values: e.values ?? null })) : []
-        };
-        if (env.BUNGIE_STATS) {
-          try { await env.BUNGIE_STATS.put(`pgcr:${instanceId}`, JSON.stringify(normalized), { expirationTtl: Number(env.PGCR_CACHE_TTL_SEC || 86400) }); } catch (e) {}
+        if (type === 'stats' || type === 'all') {
+          await triggerStatsRefresh(env);
         }
-        return jsonResponse({ ok: true, pgcr: normalized });
-      } catch (e) {
-        return jsonResponse({ ok: false, error: String(e) }, 502);
+
+        return jsonResponse({ 
+          ok: true, 
+          message: `Refresh triggered for: ${type}` 
+        }, 200, corsHeaders);
       }
-    }
 
-    // POST /run-update admin (unchanged)
-    if (request.method === 'POST' && path === '/run-update') {
-      const token = request.headers.get('x-admin-token') || '';
-      if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) return jsonResponse({ ok: false, reason: 'unauthorized' }, 401);
-      let body = null;
-      try { body = await request.json().catch(()=>null); } catch (e) { body = null; }
-      const action = (body && body.action) || 'clears';
-      const wait = Boolean(body && body.wait);
-      try {
-        const id = env.GLOBAL_STATS.idFromName('global');
-        const stub = env.GLOBAL_STATS.get(id);
-        const doPath = action === 'members' ? '/update-members' : '/update-clears';
-        const payload = action === 'members' ? JSON.stringify(body.opts || {}) : JSON.stringify({ ...(body.opts || {}), includeDeletedCharacters: true });
-        if (wait) {
-          const res = await stub.fetch(`https://globalstats.local${doPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-token': token }, body: payload });
-          const text = await res.text().catch(()=>null);
-          try { return new Response(text || JSON.stringify({ ok: false }), { status: res.status, headers: { 'Content-Type': 'application/json' }}); } catch (e) { return jsonResponse({ ok: false, error: String(e) }, 502); }
-        } else {
-          stub.fetch(`https://globalstats.local${doPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-token': token }, body: payload }).catch(()=>{});
-          return jsonResponse({ ok: true, job: 'accepted', action }, 202);
-        }
-      } catch (e) {
-        return jsonResponse({ ok: false, reason: 'do_forward_failed', error: String(e) }, 500);
+      return new Response('Not Found', { status: 404, headers: corsHeaders });
+
+    } catch (error) {
+      console.error('Worker error:', error);
+      return jsonResponse({ 
+        error: error.message || 'Internal server error' 
+      }, 500, corsHeaders);
+    }
+  },
+
+  // Cron - runs every 5 minutes
+  async scheduled(event, env, ctx) {
+    console.log('[Cron] Triggered at:', new Date().toISOString());
+    
+    try {
+      // Always refresh members (lightweight, tracks online status)
+      await triggerMembersRefresh(env);
+      
+      // Get current members to check online status
+      const members = await env.BUNGIE_STATS.get('members', 'json');
+      const hasOnlineMembers = members?.members?.some(m => m.isOnline) || false;
+      const onlineCount = members?.members?.filter(m => m.isOnline).length || 0;
+      
+      // Get last stats update time
+      const stats = await env.BUNGIE_STATS.get('stats_snapshot', 'json');
+      const lastUpdate = stats?.fetchedAt ? new Date(stats.fetchedAt).getTime() : 0;
+      const timeSinceUpdate = Date.now() - lastUpdate;
+      
+      // Adaptive polling based on activity:
+      // - Online members: Update every 5 minutes
+      // - No online members: Update every 2 hours (to catch recently completed activities)
+      const updateInterval = hasOnlineMembers ? 5 * 60 * 1000 : 2 * 60 * 60 * 1000;
+      const shouldUpdate = timeSinceUpdate > updateInterval;
+      
+      if (shouldUpdate) {
+        console.log(`[Cron] Triggering stats refresh (${onlineCount} online, last update: ${Math.floor(timeSinceUpdate / 60000)}m ago)`);
+        await triggerStatsRefresh(env);
+      } else {
+        console.log(`[Cron] Skipping stats refresh (${onlineCount} online, last update: ${Math.floor(timeSinceUpdate / 60000)}m ago, next in: ${Math.floor((updateInterval - timeSinceUpdate) / 60000)}m)`);
       }
+      
+    } catch (error) {
+      console.error('[Cron] Error:', error);
     }
-
-    return new Response('Not found', { status: 404 });
   }
 };
+
+// Helper: Trigger members refresh
+async function triggerMembersRefresh(env) {
+  const id = env.STATS_COORDINATOR.idFromName('coordinator');
+  const stub = env.STATS_COORDINATOR.get(id);
+  
+  try {
+    await stub.fetch('https://internal/refresh-members', { method: 'POST' });
+  } catch (err) {
+    console.error('[triggerMembersRefresh] Failed:', err);
+  }
+}
+
+// Helper: Trigger stats refresh
+async function triggerStatsRefresh(env) {
+  const id = env.STATS_COORDINATOR.idFromName('coordinator');
+  const stub = env.STATS_COORDINATOR.get(id);
+  
+  try {
+    await stub.fetch('https://internal/refresh-stats', { method: 'POST' });
+  } catch (err) {
+    console.error('[triggerStatsRefresh] Failed:', err);
+  }
+}
+
+// Helper: Fetch recent clan clears - one activity per member from their most recent character
+async function fetchRecentClanClears(maxCount, env) {
+  console.log('[RecentClears] Fetching the most recent activity for each member...');
+
+  // Get the cached members list
+  const members = await env.BUNGIE_STATS.get('members', 'json');
+  if (!members || !members.members || members.members.length === 0) {
+    console.log('[RecentClears] No members available to fetch activities.');
+    return { clears: [], fetchedAt: new Date().toISOString() };
+  }
+
+  const recentActivities = await Promise.all(
+    members.members.map(async (member) => {
+      try {
+        // Step 1: Fetch all characters for the member
+        const charactersUrl = `https://www.bungie.net/Platform/Destiny2/${member.membershipType}/Profile/${member.membershipId}/?components=200`;
+        const response = await fetch(charactersUrl, {
+          headers: { 'X-API-Key': env.BUNGIE_API_KEY },
+        });
+
+        if (!response.ok) {
+          console.warn(`[RecentClears] Failed to fetch characters for member ${member.membershipId}. Status: ${response.status}`);
+          return null;
+        }
+
+        const data = await response.json();
+        const characters = data.Response?.characters?.data;
+        if (!characters || Object.keys(characters).length === 0) {
+          console.warn(`[RecentClears] No characters found for member ${member.membershipId}`);
+          return null;
+        }
+
+        // Step 2: Determine the most recent character
+        let mostRecentCharacter = null;
+        let latestDate = 0;
+        for (const charId in characters) {
+          const char = characters[charId];
+          const lastPlayed = new Date(char.dateLastPlayed).getTime();
+          if (lastPlayed > latestDate) {
+            latestDate = lastPlayed;
+            mostRecentCharacter = char;
+          }
+        }
+
+        if (!mostRecentCharacter) {
+          console.warn(`[RecentClears] Could not determine the most recent character for member ${member.membershipId}`);
+          return null;
+        }
+
+        // Step 3: Fetch the most recent activity for the most recent character
+        const activityUrl = `https://www.bungie.net/Platform/Destiny2/${member.membershipType}/Account/${member.membershipId}/Character/${mostRecentCharacter.characterId}/Stats/Activities/?count=1`;
+        const activityResponse = await fetch(activityUrl, {
+          headers: { 'X-API-Key': env.BUNGIE_API_KEY },
+        });
+
+        if (!activityResponse.ok) {
+          console.warn(`[RecentClears] Failed to fetch recent activity for member ${member.membershipId}, character ${mostRecentCharacter.characterId}. Status: ${activityResponse.status}`);
+          return null;
+        }
+
+        const activityData = await activityResponse.json();
+        const activity = activityData.Response?.activities?.[0];
+        if (!activity) {
+          console.warn(`[RecentClears] No recent activity found for member ${member.membershipId}, character ${mostRecentCharacter.characterId}`);
+          return null;
+        }
+
+        // Return the most recent activity
+        return {
+          membershipId: member.membershipId,
+          membershipType: member.membershipType,
+          characterId: mostRecentCharacter.characterId,
+          instanceId: activity.activityDetails.instanceId,
+          activityHash: activity.activityDetails.referenceId,
+          period: activity.period,
+          completed: activity.values?.completionReason?.basic?.value === 0,
+          activityDurationSeconds: activity.values?.activityDurationSeconds?.basic?.value,
+        };
+      } catch (error) {
+        console.error(`[RecentClears] Error fetching activity for member ${member.membershipId}:`, error);
+        return null;
+      }
+    })
+  );
+
+  // Filter out null values and limit to maxCount
+  const filteredActivities = recentActivities.filter((activity) => activity).slice(0, maxCount);
+
+  console.log(`[RecentClears] Successfully fetched ${filteredActivities.length} activities.`);
+  return {
+    clears: filteredActivities,
+    count: filteredActivities.length,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// Helper: JSON response
+function jsonResponse(data, status = 200, additionalHeaders = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...additionalHeaders
+    }
+  });
+}
