@@ -13,14 +13,7 @@ routes = [
 [triggers]
 crons = ["*/5 * * * *"]
 
-<<<<<<< HEAD
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = [ "GlobalStats", "MemberWorker" ]
-
-=======
 # KV namespace for caching
->>>>>>> recovery
 [[kv_namespaces]]
 binding = "BUNGIE_STATS"
 id = "3ac5034307be43da8c41bba24cb67c87"
