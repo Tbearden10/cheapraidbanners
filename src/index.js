@@ -1,385 +1,295 @@
-// Entrypoint worker: HTTP endpoints for frontend/admin and scheduled cron.
-// Exports Durable Objects used by wrangler.
-export { GlobalStats } from './global_stats.js';
-export { MemberWorker } from './member_worker.js';
+// File: index.js
+// Main Cloudflare Worker - Handles HTTP requests and cron triggers
 
-const DEFAULT_TIMEOUT = 8000;
-
-async function fetchWithTimeout(url, opts = {}, timeoutMs = DEFAULT_TIMEOUT) {
-  const ctrl = new AbortController();
-  const id = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...opts, signal: ctrl.signal });
-    return res;
-  } finally {
-    clearTimeout(id);
-  }
-}
-
-function normalizeClearsSnapshot(snap) {
-  if (!snap) return snap;
-  const out = { ...snap };
-  if (Array.isArray(out.perMember)) {
-    out.perMember = out.perMember.slice().sort((a, b) => String(a.membershipId).localeCompare(String(b.membershipId)));
-  }
-  return out;
-}
-function snapshotsEqual(a, b) {
-  try {
-    if (!a && !b) return true;
-    if (!a || !b) return false;
-    return JSON.stringify(normalizeClearsSnapshot(a)) === JSON.stringify(normalizeClearsSnapshot(b));
-  } catch (e) {
-    return false;
-  }
-}
-
-function shouldWait(url, request) {
-  try {
-    const u = new URL(url);
-    if (u.searchParams.has('sync') && u.searchParams.get('sync') === '1') return true;
-  } catch (e) {}
-  const waitHeader = request.headers.get('x-wait');
-  if (waitHeader && (waitHeader === '1' || waitHeader.toLowerCase() === 'true')) return true;
-  return false;
-}
-
-function jsonResponse(obj, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { 'Content-Type': 'application/json' }});
-}
-
-// Build partial snapshot from per-member KV entries (member_clears:<id>)
-async function buildPartialSnapshotFromMemberKV(env) {
-  if (!env.BUNGIE_STATS) return null;
-  try {
-    const listed = await env.BUNGIE_STATS.list({ prefix: 'member_clears:' });
-    const keys = (listed && listed.keys) ? listed.keys.map(k => k.name) : [];
-    if (!keys.length) return null;
-    const perMember = [];
-    let total = 0;
-    let totalProphecy = 0;
-    for (const key of keys) {
-      try {
-        const raw = await env.BUNGIE_STATS.get(key);
-        if (!raw) continue;
-        const kv = JSON.parse(raw);
-        const id = key.replace(/^member_clears:/, '');
-        const c = Number(kv.clears || 0);
-        const p = Number(kv.prophecyClears || 0);
-        total += c;
-        totalProphecy += p;
-        perMember.push({
-          membershipId: id,
-          membershipType: Number(kv.membershipType || kv.membership_type || 0),
-          clears: Number(c),
-          prophecyClears: Number(p),
-          lastActivityAt: kv.lastActivityAt || kv.fetchedAt || null,
-          mostRecentActivity: kv.mostRecentActivity || null
-        });
-      } catch (e) {
-        // skip malformed
-      }
-    }
-    // build overall mostRecentClanActivity using same logic as GlobalStats.aggregate (simple)
-    // For simplicity here we return partial perMember; GlobalStats DO will build canonical snapshot.
-    return {
-      fetchedAt: new Date().toISOString(),
-      source: 'partial-aggregate',
-      clears: total,
-      prophecyClears: totalProphecy,
-      perMember,
-      memberCount: perMember.length,
-      processedCount: perMember.length
-    };
-  } catch (e) {
-    console.warn('[index] buildPartialSnapshotFromMemberKV failed', e && e.message ? e.message : e);
-    return null;
-  }
-}
-
-// Helper: fetch PGCR from Bungie and cache in KV
-async function fetchPgcrAndCache(env, instanceId, cacheTtlSec = 86400) {
-  if (!instanceId) throw new Error('missing_instanceId');
-  const cacheKey = `pgcr:${instanceId}`;
-  if (env.BUNGIE_STATS) {
-    try {
-      const cached = await env.BUNGIE_STATS.get(cacheKey);
-      if (cached) {
-        try { return JSON.parse(cached); } catch (e) { /* fallthrough to refetch */ }
-      }
-    } catch (e) {
-      console.warn('[index] pgcr: KV read failed', e && e.message ? e.message : e);
-    }
-  }
-
-  // Build Bungie PGCR URL (use endpoints per Bungie API)
-  const apiKey = env.BUNGIE_API_KEY || '';
-  const url = `https://www.bungie.net/Platform/Destiny2/Stats/PostGameCarnageReport/${encodeURIComponent(instanceId)}/`;
-  const headers = { Accept: 'application/json' };
-  if (apiKey) headers['X-API-Key'] = apiKey;
-
-  const res = await fetch(url, { method: 'GET', headers, redirect: 'follow' });
-  if (!res || !res.ok) {
-    const text = await res.text().catch(() => null);
-    const err = new Error(`bungie pgcr non-ok: ${res ? res.status : 'no_resp'} ${text ? text.slice(0,200) : ''}`);
-    err.status = res ? res.status : null;
-    throw err;
-  }
-
-  const payload = await res.json().catch(() => null);
-  if (!payload) throw new Error('invalid_pgcr_json');
-
-  // Normalize a small subset for frontend (avoid storing huge blob if desired) — but store full payload too
-  const normalized = {
-    fetchedAt: new Date().toISOString(),
-    instanceId,
-    raw: payload,
-    // try to derive some friendly fields
-    period: payload?.Response?.period ?? payload?.Response?.period ?? null,
-    activityHash: payload?.Response?.activityDetails?.referenceId ?? payload?.Response?.activityDetails?.activityHash ?? null,
-    mode: payload?.Response?.activityDetails?.mode ?? null,
-    activityName: payload?.Response?.activityDetails?.name ?? null,
-    entries: Array.isArray(payload?.Response?.entries) ? payload.Response.entries.map(e => ({
-      characterId: e.characterId ?? e.character_id ?? null,
-      membershipId: e.player?.destinyUserInfo?.membershipId ?? null,
-      displayName: (e.player?.destinyUserInfo?.displayName ?? e.player?.destinyUserInfo?.bungieGlobalDisplayName ?? null) || null,
-      values: e.values ?? null
-    })) : []
-  };
-
-  // cache full payload in KV to allow more detailed inspection later
-  if (env.BUNGIE_STATS) {
-    try {
-      await env.BUNGIE_STATS.put(cacheKey, JSON.stringify(normalized), { expirationTtl: Number(cacheTtlSec) });
-    } catch (e) {
-      console.warn('[index] pgcr: KV write failed', e && e.message ? e.message : e);
-    }
-  }
-
-  return normalized;
-}
+export { StatsCoordinator } from './stats_coordinator.js';
+import { fetchEnrichedPGCR } from './enhanced_pgcr.js';
 
 export default {
-  // HTTP handler for frontend & admin
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
-    const search = url.searchParams;
 
-    // GET /members
-    if (request.method === 'GET' && path === '/members') {
-      const wantFresh = search.has('fresh');
-      const wantCached = search.has('cached') || (!wantFresh && !!env.BUNGIE_STATS);
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
 
-      if (wantCached && env.BUNGIE_STATS) {
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
+    }
+
+    try {
+      // GET /members - Returns cached member list
+      if (path === '/members' && request.method === 'GET') {
+        const members = await env.BUNGIE_STATS.get('members', 'json');
+        
+        if (!members) {
+          await triggerMembersRefresh(env);
+          return jsonResponse({ 
+            members: [], 
+            fetchedAt: null, 
+            loading: true 
+          }, 202, corsHeaders);
+        }
+
+        return jsonResponse(members, 200, corsHeaders);
+      }
+
+      // GET /stats - Returns cached stats snapshot
+      if (path === '/stats' && request.method === 'GET') {
+        const stats = await env.BUNGIE_STATS.get('stats_snapshot', 'json');
+        
+        if (!stats) {
+          await triggerStatsRefresh(env);
+          return jsonResponse({ 
+            raidClears: 0, 
+            dungeonClears: 0, 
+            totalPlaytimeSeconds: 0,
+            memberCount: 0,
+            fetchedAt: null,
+            loading: true 
+          }, 202, corsHeaders);
+        }
+
+        return jsonResponse(stats, 200, corsHeaders);
+      }
+
+      // GET /recent-clears - Fetch recent activities for clan members
+      if (path === '/recent-clears' && request.method === 'GET') {
         try {
-          // List per-member keys and fetch each
-          const listed = await env.BUNGIE_STATS.list({ prefix: 'member:' });
-          const keys = (listed && listed.keys) ? listed.keys.map(k => k.name) : [];
-          const members = [];
-          for (const key of keys) {
-            try {
-              const raw = await env.BUNGIE_STATS.get(key);
-              if (!raw) continue;
-              const parsed = JSON.parse(raw);
-              members.push(parsed);
-            } catch (e) { /* skip malformed */ }
-          }
-          return jsonResponse({ fetchedAt: new Date().toISOString(), members, memberCount: members.length });
-        } catch (e) {
-          console.warn('[index] KV read members (per-member keys) failed', e && e.message ? e.message : e);
-          // fall through to fresh flow
+          const count = parseInt(url.searchParams.get('count')) || 30;
+          const maxCount = Math.min(count, 30);
+
+
+          console.log('[COUNT]:')
+          
+          const recentClears = await fetchRecentClanClears(maxCount, env);
+          return jsonResponse(recentClears, 200, corsHeaders);
+        } catch (error) {
+          console.error('[RecentClears] Fetch error:', error);
+          return jsonResponse({ 
+            error: error.message || 'Failed to fetch recent clears',
+            clears: []
+          }, 500, corsHeaders);
         }
       }
 
-      // Trigger GlobalStats DO to refresh members
-      const wait = shouldWait(request.url, request);
-      try {
-        const id = env.GLOBAL_STATS.idFromName('global');
-        const stub = env.GLOBAL_STATS.get(id);
-        const body = JSON.stringify({});
-        if (!wait) {
-          // fire-and-forget
-          stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
-            .then(async (r) => { try { const t = await r.text().catch(() => null); console.log('[index] update-members background', r.status, (t||'').slice(0,200)); } catch(e){} })
-            .catch(err => console.error('[index] bg update-members failed', err));
-          return jsonResponse({ ok: true, job: 'accepted', message: 'Members refresh dispatched' }, 202);
-        } else {
-          // synchronous wait for DO
-          const res = await stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-          const text = await res.text().catch(() => null);
-          return new Response(text || JSON.stringify({ ok: false }), { status: res.status, headers: { 'Content-Type': 'application/json' }});
+      // GET /pgcr - Get enhanced activity details
+      if (path === '/pgcr' && request.method === 'GET') {
+        const instanceId = url.searchParams.get('instanceId');
+        if (!instanceId) {
+          return jsonResponse({ error: 'Missing instanceId' }, 400, corsHeaders);
         }
-      } catch (e) {
-        console.error('[index] update-members forward error', e);
-        return jsonResponse({ ok: false, reason: 'do_forward_failed', error: String(e) }, 500);
-      }
-    }
 
-    // GET /stats
-    // Behavior:
-    // - If ?cached=1 present -> return cached snapshot if valid OR partial aggregated snapshot -> DO NOT dispatch background compute here.
-    // - If ?fresh=1 present -> return cached/partial immediately (annotated) and fire background compute (non-blocking).
-    // - If neither param present -> behave like cached (no dispatch).
-    if (request.method === 'GET' && path === '/stats') {
-      const wantCached = search.has('cached');
-      const wantFresh = search.has('fresh');
-
-      // Helper: read cached snapshot if valid
-      const readCachedSnapshot = async () => {
-        if (!env.BUNGIE_STATS) return null;
         try {
-          const raw = await env.BUNGIE_STATS.get('clears_snapshot');
-          if (!raw) return null;
-          let parsed = null;
-          try { parsed = JSON.parse(raw); } catch (e) { parsed = null; }
-          // Validate parsed shape
-          if (parsed && (typeof parsed.clears !== 'undefined' || Array.isArray(parsed.perMember))) return parsed;
-          // invalid shape stored in clears_snapshot
-          console.warn('[index] clears_snapshot exists but does not look like a valid snapshot');
-          return null;
-        } catch (e) {
-          console.warn('[index] KV read clears_snapshot failed', e && e.message ? e.message : e);
-          return null;
-        }
-      };
-
-      // If caller explicitly requested cached-only, return cached or partial and DO NOT dispatch
-      if (wantCached && !wantFresh) {
-        const cached = await readCachedSnapshot();
-        if (cached) return jsonResponse(cached);
-        const partial = await buildPartialSnapshotFromMemberKV(env);
-        if (partial) return jsonResponse(partial);
-        return jsonResponse({ ok: false, reason: 'no_snapshot' }, 404);
-      }
-
-      // If caller requested fresh, return cached/partial immediately and trigger background update
-      if (wantFresh) {
-        const cached = await readCachedSnapshot();
-        if (cached) {
-          // trigger background update (non-blocking)
-          (async () => {
-            try {
-              const id = env.GLOBAL_STATS.idFromName('global');
-              const stub = env.GLOBAL_STATS.get(id);
-              await stub.fetch('https://globalstats.local/update-clears', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ includeDeletedCharacters: true }) });
-            } catch (e) {}
-          })();
-          cached._backgroundRefresh = true;
-          return jsonResponse(cached);
-        }
-        // no cached snapshot: try partial
-        const partial = await buildPartialSnapshotFromMemberKV(env);
-        if (partial) {
-          (async () => {
-            try {
-              const id = env.GLOBAL_STATS.idFromName('global');
-              const stub = env.GLOBAL_STATS.get(id);
-              await stub.fetch('https://globalstats.local/update-clears', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ includeDeletedCharacters: true }) });
-            } catch (e) {}
-          })();
-          partial._backgroundRefresh = true;
-          return jsonResponse(partial);
-        }
-
-        // no cached or partial: trigger background update and return accepted
-        try {
-          const id = env.GLOBAL_STATS.idFromName('global');
-          const stub = env.GLOBAL_STATS.get(id);
-          stub.fetch('https://globalstats.local/update-clears', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ includeDeletedCharacters: true }) })
-            .then(async (r) => { try { const t = await r.text().catch(() => null); console.log('[index] background update-clears', r.status, (t||'').slice(0,200)); } catch(e){} })
-            .catch(err => console.error('[index] bg update-clears failed', err));
-          return jsonResponse({ ok: true, job: 'accepted', message: 'Clears job dispatched' }, 202);
-        } catch (e) {
-          console.error('[index] update-clears forward error', e);
-          return jsonResponse({ ok: false, reason: 'do_forward_failed', error: String(e) }, 500);
+          const enrichedPGCR = await fetchEnrichedPGCRWithCache(instanceId, env);
+          return jsonResponse(enrichedPGCR, 200, corsHeaders);
+        } catch (error) {
+          console.error('[PGCR] Fetch error:', error);
+          return jsonResponse({ 
+            error: error.message || 'Failed to fetch PGCR' 
+          }, 500, corsHeaders);
         }
       }
 
-      // Default (no params): behave like cached read (do not dispatch)
-      const cached = await readCachedSnapshot();
-      if (cached) return jsonResponse(cached);
-      const partial = await buildPartialSnapshotFromMemberKV(env);
-      if (partial) return jsonResponse(partial);
-      return jsonResponse({ ok: false, reason: 'no_snapshot' }, 404);
+      // POST /admin/refresh - Manual refresh trigger
+      if (path === '/admin/refresh' && request.method === 'POST') {
+        const token = request.headers.get('x-admin-token');
+        if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
+          return jsonResponse({ error: 'Unauthorized' }, 401, corsHeaders);
+        }
+
+        const body = await request.json().catch(() => ({}));
+        const type = body.type || 'all';
+
+        if (type === 'members' || type === 'all') {
+          await triggerMembersRefresh(env);
+        }
+        if (type === 'stats' || type === 'all') {
+          await triggerStatsRefresh(env);
+        }
+
+        return jsonResponse({ 
+          ok: true, 
+          message: `Refresh triggered for: ${type}` 
+        }, 200, corsHeaders);
+      }
+
+      return new Response('Not Found', { status: 404, headers: corsHeaders });
+
+    } catch (error) {
+      console.error('Worker error:', error);
+      return jsonResponse({ 
+        error: error.message || 'Internal server error' 
+      }, 500, corsHeaders);
     }
-
-    // GET /pgcr?instanceId=...
-    if (request.method === 'GET' && path === '/pgcr') {
-      const instanceId = search.get('instanceId') || null;
-      if (!instanceId) return jsonResponse({ ok: false, error: 'missing_instanceId' }, 400);
-      try {
-        const pgcr = await fetchPgcrAndCache(env, instanceId, Number(env.PGCR_CACHE_TTL_SEC || 86400));
-        return jsonResponse({ ok: true, pgcr });
-      } catch (e) {
-        console.error('[index] /pgcr fetch error', e && e.message ? e.message : e);
-        return jsonResponse({ ok: false, error: e && e.message ? e.message : String(e) }, 502);
-      }
-    }
-
-    // POST /run-update admin - forwards to GlobalStats DO (members or clears)
-    if (request.method === 'POST' && path === '/run-update') {
-      const token = request.headers.get('x-admin-token') || '';
-      if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) return jsonResponse({ ok: false, reason: 'unauthorized' }, 401);
-
-      let body = null;
-      try { body = await request.json().catch(() => null); } catch (e) { body = null; }
-
-      const action = (body && body.action) || 'clears';
-      const wait = Boolean(body && (body.wait || (request.headers.get('x-wait') === '1')));
-      const opts = (body && body.opts) || {};
-
-      try {
-        const id = env.GLOBAL_STATS.idFromName('global');
-        const stub = env.GLOBAL_STATS.get(id);
-        const doPath = action === 'members' ? '/update-members' : '/update-clears';
-        const payload = action === 'members' ? JSON.stringify(opts || {}) : JSON.stringify({ includeDeletedCharacters: true, ...(opts || {}) });
-
-        if (!wait) {
-          stub.fetch(`https://globalstats.local${doPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-token': token }, body: payload })
-            .then(async (r) => { try { const t = await r.text().catch(() => null); console.log('[index] admin bg do', doPath, r.status, (t||'').slice(0,200)); } catch(e){} })
-            .catch(err => console.error('[index] admin bg do failed', err));
-          return jsonResponse({ ok: true, job: 'accepted', action }, 202);
-        } else {
-          const res = await stub.fetch(`https://globalstats.local${doPath}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-admin-token': token }, body: payload });
-          const text = await res.text().catch(() => null);
-          return new Response(text || JSON.stringify({ ok: false }), { status: res.status, headers: { 'Content-Type': 'application/json' }});
-        }
-      } catch (e) {
-        console.error('[index] admin run-update forward failed', e);
-        return jsonResponse({ ok: false, reason: 'do_forward_failed', error: String(e) }, 500);
-      }
-    }
-
-    // GET /clears-snapshot (reader)
-    if (request.method === 'GET' && path === '/clears-snapshot') {
-      if (!env.BUNGIE_STATS) return jsonResponse({ ok: false, reason: 'no_kv' }, 404);
-      try {
-        const raw = await env.BUNGIE_STATS.get('clears_snapshot');
-        if (!raw) return jsonResponse({ ok: false, reason: 'no_snapshot' }, 404);
-        return jsonResponse(JSON.parse(raw));
-      } catch (e) {
-        console.warn('[index] KV read clears_snapshot failed', e && e.message ? e.message : e);
-        return jsonResponse({ ok: false, reason: 'kv_read_failed', error: String(e) }, 500);
-      }
-    }
-
-    return new Response('Not found', { status: 404 });
   },
 
-  // Cron/scheduled handler: kick off regular member & clears updates (fire-and-forget)
+  // Cron - runs every 5 minutes
   async scheduled(event, env, ctx) {
+    console.log('[Cron] Triggered at:', new Date().toISOString());
+    
     try {
-      const id = env.GLOBAL_STATS.idFromName('global');
-      const stub = env.GLOBAL_STATS.get(id);
-      // Dispatch clears and members refresh in background; includeDeletedCharacters:true default
-      stub.fetch('https://globalstats.local/update-clears', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ includeDeletedCharacters: true }) }).catch(() => {});
-      // Stagger second call slightly
-      setTimeout(() => {
-        stub.fetch('https://globalstats.local/update-members', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) }).catch(() => {});
-      }, 2500);
-    } catch (e) {
-      console.error('[index] scheduled handler error', e && e.message ? e.message : e);
+      // Always refresh members (lightweight, tracks online status)
+      await triggerMembersRefresh(env);
+      
+      // Get current members to check online status
+      const members = await env.BUNGIE_STATS.get('members', 'json');
+      const hasOnlineMembers = members?.members?.some(m => m.isOnline) || false;
+      const onlineCount = members?.members?.filter(m => m.isOnline).length || 0;
+      
+      // Get last stats update time
+      const stats = await env.BUNGIE_STATS.get('stats_snapshot', 'json');
+      const lastUpdate = stats?.fetchedAt ? new Date(stats.fetchedAt).getTime() : 0;
+      const timeSinceUpdate = Date.now() - lastUpdate;
+      
+      // Adaptive polling based on activity:
+      // - Online members: Update every 5 minutes
+      // - No online members: Update every 2 hours (to catch recently completed activities)
+      const updateInterval = hasOnlineMembers ? 5 * 60 * 1000 : 2 * 60 * 60 * 1000;
+      const shouldUpdate = timeSinceUpdate > updateInterval;
+      
+      if (shouldUpdate) {
+        console.log(`[Cron] Triggering stats refresh (${onlineCount} online, last update: ${Math.floor(timeSinceUpdate / 60000)}m ago)`);
+        await triggerStatsRefresh(env);
+      } else {
+        console.log(`[Cron] Skipping stats refresh (${onlineCount} online, last update: ${Math.floor(timeSinceUpdate / 60000)}m ago, next in: ${Math.floor((updateInterval - timeSinceUpdate) / 60000)}m)`);
+      }
+      
+    } catch (error) {
+      console.error('[Cron] Error:', error);
     }
   }
 };
+
+// Helper: Trigger members refresh
+async function triggerMembersRefresh(env) {
+  const id = env.STATS_COORDINATOR.idFromName('coordinator');
+  const stub = env.STATS_COORDINATOR.get(id);
+  
+  try {
+    await stub.fetch('https://internal/refresh-members', { method: 'POST' });
+  } catch (err) {
+    console.error('[triggerMembersRefresh] Failed:', err);
+  }
+}
+
+// Helper: Trigger stats refresh
+async function triggerStatsRefresh(env) {
+  const id = env.STATS_COORDINATOR.idFromName('coordinator');
+  const stub = env.STATS_COORDINATOR.get(id);
+  
+  try {
+    await stub.fetch('https://internal/refresh-stats', { method: 'POST' });
+  } catch (err) {
+    console.error('[triggerStatsRefresh] Failed:', err);
+  }
+}
+
+// Helper: Fetch recent clan clears - one activity per member from their most recent character
+async function fetchRecentClanClears(maxCount, env) {
+  console.log('[RecentClears] Fetching the most recent activity for each member...');
+
+  // Get the cached members list
+  const members = await env.BUNGIE_STATS.get('members', 'json');
+  if (!members || !members.members || members.members.length === 0) {
+    console.log('[RecentClears] No members available to fetch activities.');
+    return { clears: [], fetchedAt: new Date().toISOString() };
+  }
+
+  const recentActivities = await Promise.all(
+    members.members.map(async (member) => {
+      try {
+        // Step 1: Fetch all characters for the member
+        const charactersUrl = `https://www.bungie.net/Platform/Destiny2/${member.membershipType}/Profile/${member.membershipId}/?components=200`;
+        const response = await fetch(charactersUrl, {
+          headers: { 'X-API-Key': env.BUNGIE_API_KEY },
+        });
+
+        if (!response.ok) {
+          console.warn(`[RecentClears] Failed to fetch characters for member ${member.membershipId}. Status: ${response.status}`);
+          return null;
+        }
+
+        const data = await response.json();
+        const characters = data.Response?.characters?.data;
+        if (!characters || Object.keys(characters).length === 0) {
+          console.warn(`[RecentClears] No characters found for member ${member.membershipId}`);
+          return null;
+        }
+
+        // Step 2: Determine the most recent character
+        let mostRecentCharacter = null;
+        let latestDate = 0;
+        for (const charId in characters) {
+          const char = characters[charId];
+          const lastPlayed = new Date(char.dateLastPlayed).getTime();
+          if (lastPlayed > latestDate) {
+            latestDate = lastPlayed;
+            mostRecentCharacter = char;
+          }
+        }
+
+        if (!mostRecentCharacter) {
+          console.warn(`[RecentClears] Could not determine the most recent character for member ${member.membershipId}`);
+          return null;
+        }
+
+        // Step 3: Fetch the most recent activity for the most recent character
+        const activityUrl = `https://www.bungie.net/Platform/Destiny2/${member.membershipType}/Account/${member.membershipId}/Character/${mostRecentCharacter.characterId}/Stats/Activities/?count=1`;
+        const activityResponse = await fetch(activityUrl, {
+          headers: { 'X-API-Key': env.BUNGIE_API_KEY },
+        });
+
+        if (!activityResponse.ok) {
+          console.warn(`[RecentClears] Failed to fetch recent activity for member ${member.membershipId}, character ${mostRecentCharacter.characterId}. Status: ${activityResponse.status}`);
+          return null;
+        }
+
+        const activityData = await activityResponse.json();
+        const activity = activityData.Response?.activities?.[0];
+        if (!activity) {
+          console.warn(`[RecentClears] No recent activity found for member ${member.membershipId}, character ${mostRecentCharacter.characterId}`);
+          return null;
+        }
+
+        // Return the most recent activity
+        return {
+          membershipId: member.membershipId,
+          membershipType: member.membershipType,
+          characterId: mostRecentCharacter.characterId,
+          instanceId: activity.activityDetails.instanceId,
+          activityHash: activity.activityDetails.referenceId,
+          period: activity.period,
+          completed: activity.values?.completionReason?.basic?.value === 0,
+          activityDurationSeconds: activity.values?.activityDurationSeconds?.basic?.value,
+        };
+      } catch (error) {
+        console.error(`[RecentClears] Error fetching activity for member ${member.membershipId}:`, error);
+        return null;
+      }
+    })
+  );
+
+  // Filter out null values and limit to maxCount
+  const filteredActivities = recentActivities.filter((activity) => activity).slice(0, maxCount);
+
+  console.log(`[RecentClears] Successfully fetched ${filteredActivities.length} activities.`);
+  return {
+    clears: filteredActivities,
+    count: filteredActivities.length,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// Helper: JSON response
+function jsonResponse(data, status = 200, additionalHeaders = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...additionalHeaders
+    }
+  });
+}

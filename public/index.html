@@ -64,39 +64,87 @@
         </p>
       </div>
 
-      <div class="stats-wrap stagger-container" data-delay="180">
-        <div class="stat-card scroll-reveal" data-delay="200">
-          <div class="stat-label">MEMBERS</div>
-          <div class="stat-value" id="members-count">—</div>
+      <!-- NEW: Compact Stats Bar + Gallery Layout -->
+      <div class="stats-and-gallery-layout scroll-reveal" data-delay="180">
+        
+        <!-- Compact Stats Bar -->
+        <div class="compact-stats-bar">
+          <div class="compact-stat">
+            <div class="compact-stat-value" id="members-count">—</div>
+            <div class="compact-stat-label">MEMBERS</div>
+          </div>
+          
+          <div class="stat-divider"></div>
+          
+          <div class="compact-stat">
+            <div class="compact-stat-value" id="dungeon-count">—</div>
+            <div class="compact-stat-label">DUNGEON CLEARS</div>
+          </div>
+          
+          <div class="stat-divider"></div>
+          
+          <div class="compact-stat">
+            <div class="compact-stat-value" id="raid-count">—</div>
+            <div class="compact-stat-label">RAID CLEARS</div>
+          </div>
+          
+          <div class="stat-divider"></div>
+          
+          <div class="compact-stat">
+            <div class="compact-stat-value" id="playtime">—</div>
+            <div class="compact-stat-label">TOTAL CLEAR TIME</div>
+          </div>
         </div>
 
-        <div class="stat-card scroll-reveal" data-delay="260">
-          <div class="stat-label">PROPH CLEARS</div>
-          <div class="stat-value" id="prophecy-count">—</div>
+        <!-- Gallery Section -->
+        <div class="gallery-section">
+          <div class="gallery-header">
+            <h3 class="gallery-title">RECENT ADVENTURES</h3>
+          </div>
+          
+          <div id="recent-activity-content" class="gallery-grid">
+            <div style="color: var(--chocolate); font-style: italic; text-align: center; padding: 40px;">Loading...</div>
+          </div>
         </div>
 
-        <div class="stat-card scroll-reveal" data-delay="320">
-          <div class="stat-label">TOTAL DUNGEON CLEARS</div>
-          <div class="stat-value" id="total-count">—</div>
-        </div>
-      </div>
-
-      <div class="stats-footer scroll-reveal" data-delay="380">
-        <span class="updated-label">LAST UPDATED</span>
+      <div class="stats-footer scroll-reveal" data-delay="360">
+        <span class="updated-label">LAST UPDATED: </span>
         <span class="updated-value" id="last-updated">never</span>
+      </div>
+    </section>
+
+    <!-- Activity Leaderboard -->
+    <section class="activity-leaderboard scroll-reveal" data-delay="300">
+      <h2 class="section-title">MOST PLAYED DUNGEONS</h2>
+      <div class="activity-leaderboard-container">
+        <div id="activity-leaderboard-content">
+          <div style="text-align: center; padding: 40px; color: var(--chocolate);">Loading...</div>
+        </div>
       </div>
     </section>
 
     <!-- Members -->
     <section class="members-section">
-      <h2 class="section-title scroll-reveal" data-delay="420">MEMBERS</h2>
+      <h2 class="section-title scroll-reveal" data-delay="400">MEMBERS</h2>
 
-      <div id="member-list-container" class="members-grid stagger-container" data-delay="480">
-        <!-- JS will populate member cards here -->
+      <!-- Member Stats Visualization -->
+      <div class="member-stats-viz scroll-reveal" data-delay="420">
+        <div class="viz-header">
+        </div>
+        <div id="member-stats-container" class="member-stats-container">
+          <div style="text-align: center; padding: 40px; color: var(--chocolate);">Loading stats...</div>
+        </div>
       </div>
     </section>
   </main>
 
-  <script src="script.js"></script>
+  <!-- Load JavaScript files in order -->
+  <script src="js/utils.js"></script>
+  <script src="js/pgcr.js"></script>
+  <script src="js/members.js"></script>
+  <script src="js/stats.js"></script>
+  <script src="js/activities.js"></script>
+  <script src="js/leaderboard.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>
