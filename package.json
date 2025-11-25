@@ -3,9 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "echo Building frontend... && exit 0",
+    "build": "echo 'Frontend is static' && exit 0",
     "dev": "wrangler dev --local --assets ./public",
-    "deploy": "wrangler deploy"
+    "deploy-worker": "wrangler deploy",
+    "deploy-pages": "wrangler pages deploy ./public --project-name cheapraidbanners"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251125.0",
