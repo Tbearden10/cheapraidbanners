@@ -204,7 +204,7 @@ async function fetchStatsFallback() {
   if (!members || members.length === 0) {
     // try Bungie roster fallback
     const rosterResp = await fetch(`https://www.bungie.net/Platform/GroupV2/${encodeURIComponent(window.__utils?.CLAN_ID || window.CLAN_ID)}/Members/`, {
-      headers: { 'X-API-Key': window.__utils?.BUNGIE_API_KEY || window.BUNGIE_API_KEY }
+      headers: { 'X-API-Key': env.BUNGIE_API_KEY || window.__utils?.BUNGIE_API_KEY || window.BUNGIE_API_KEY }
     }).then(r => r.ok ? r.json().catch(() => null) : null).catch(() => null);
     members = rosterResp?.Response?.results?.map((r) => r.member?.destinyUserInfo) || [];
   }

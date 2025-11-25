@@ -8,7 +8,7 @@
   window.nf = new Intl.NumberFormat();
 
   // Expose config values (frontend fallback only)
-  const BUNGIE_API_KEY = ENV.BUNGIE_API_KEY;
+  const BUNGIE_API_KEY = env.BUNGIE_API_KEY;
   const CLAN_ID = env.BUNGIE_CLAN_ID || "5335552";
 
   // Helper functions (declared to be available on window)
