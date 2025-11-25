@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "echo \"noop\"",
+    "build": "echo Building frontend... && exit 0",
     "dev": "wrangler dev --local --assets ./public",
     "deploy": "wrangler deploy"
   },
