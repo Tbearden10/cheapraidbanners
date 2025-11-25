@@ -10,6 +10,7 @@
   // Expose config values (frontend fallback only)
   const BUNGIE_API_KEY = env.BUNGIE_API_KEY;
   const CLAN_ID = env.BUNGIE_CLAN_ID || "5335552";
+  const API_BASE = 'https://api.cheapraidbanners.com'
 
   // Helper functions (declared to be available on window)
   window.escapeHtml = function (text) {

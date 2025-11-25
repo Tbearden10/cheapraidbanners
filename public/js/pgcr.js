@@ -19,7 +19,12 @@ window.showPGCRModal = async function(instanceId) {
   // Fetch data if not in cache
   try {
     console.log(`[PGCR] Fetching data for instanceId: ${instanceId}`);
-    const fetchJsonFn = window.__utils?.fetchJson || window.fetchJson;
+    const fetchJsonFn = (path, opts) => {
+      const base = (window.__utils?.API_BASE || window.API_BASE || 'https://api.cheapraidbanners.com').replace(/\/$/, '');
+      const url = new URL(path, base).toString();
+      if (typeof window.__utils?.fetchJson === 'function') return window.__utils.fetchJson(url);
+      return fetch(url, opts).then(r => r.ok ? r.json().catch(() => null) : null).catch(() => null);
+    };
     const data = await fetchJsonFn(`/pgcr?instanceId=${encodeURIComponent(instanceId)}`);
     
     if (!data || data.error) {

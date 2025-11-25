@@ -9,6 +9,7 @@
 // }
 
 let previousStatsData = null;
+const API_BASE = window.__utils?.API_BASE || 'https://api.cheapraidbanners.com';
 
 /**
  * Normalize a backend /stats response into the UI-friendly shape.
@@ -178,8 +179,8 @@ function renderStatsLocal(data, forceRender = false) {
  */
 async function loadStats(forceRender = false) {
   // Attempt server API first
-  let raw = await (window.__utils?.fetchJson ? window.__utils.fetchJson('/stats') : fetch('/stats').then(r => r.ok ? r.json().catch(()=>null) : null).catch(()=>null));
-
+  const statsUrl = new URL('/stats', API_BASE).toString();
+  let raw = await (window.__utils?.fetchJson ? window.__utils.fetchJson(statsUrl) : fetch(statsUrl).then(r => r.ok ? r.json().catch(()=>null) : null).catch(()=>null));
   if (!raw) {
     console.warn('[Stats] /stats returned no data, using client fallback');
     raw = await fetchStatsFallback();
@@ -198,9 +199,9 @@ async function loadStats(forceRender = false) {
  */
 async function fetchStatsFallback() {
   // Minimal fallback: show member count and zeros for clears/playtime
-  const membersResp = await (window.__utils?.fetchJson ? window.__utils.fetchJson('/members') : fetch('/members').then(r=>r.ok? r.json().catch(()=>null): null).catch(()=>null));
-  let members = (membersResp && (membersResp.members || membersResp)) || null;
-
+  const membersUrl = new URL('/members', (window.__utils?.API_BASE || window.API_BASE || API_BASE || 'https://api.cheapraidbanners.com')).toString();
+  const membersResp = await (window.__utils?.fetchJson ? window.__utils.fetchJson(membersUrl) : fetch(membersUrl).then(r => r.ok ? r.json().catch(()=>null) : null).catch(()=>null));
+  const members = (membersResp && (membersResp.members || membersResp)) || null;
   if (!members || members.length === 0) {
     // try Bungie roster fallback
     const rosterResp = await fetch(`https://www.bungie.net/Platform/GroupV2/${encodeURIComponent(window.__utils?.CLAN_ID || window.CLAN_ID)}/Members/`, {

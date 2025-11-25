@@ -122,7 +122,13 @@ function renderMemberStats(statsData, membersData) {
  */
 async function loadMembers(forceRender = false) {
   try {
-    const fetchJson = window.__utils?.fetchJson || (u => fetch(u).then(r => r.ok ? r.json().catch(()=>null) : null));
+    const fetchJson = (path, fetchOpts) => {
+      const base = (window.__utils?.API_BASE || window.API_BASE || API_BASE || 'https://api.cheapraidbanners.com').replace(/\/$/, '');
+      const url = new URL(path, base).toString();
+      return window.__utils?.fetchJson
+        ? window.__utils.fetchJson(url)
+        : fetch(url, fetchOpts).then(r => r.ok ? r.json().catch(()=>null) : null).catch(()=>null);
+    };
     const data = await fetchJson('/members');
 
     if (!data || !Array.isArray(data.members) || data.members.length === 0) {

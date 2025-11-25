@@ -33,8 +33,19 @@ async function loadRecentActivities() {
   try {
     container.innerHTML = '<div style="color: var(--chocolate); text-align:center; padding:40px;">Loading recent activities...</div>';
 
-    // Fetch from backend endpoint which fetches activity history from Bungie API
-    const activities = await safeFetchJson('/recent-activities');
+    const safeFetchJson = async (path, fetchOpts) => {
+      const base = (window.__utils?.API_BASE || window.API_BASE || 'https://api.cheapraidbanners.com').replace(/\/$/, '');
+      const url = new URL(path, base).toString();
+      if (window.__utils?.fetchJson) return window.__utils.fetchJson(url);
+      try {
+        const res = await fetch(url, fetchOpts);
+        if (!res.ok) return null;
+        return await res.json().catch(() => null);
+      } catch (err) {
+        console.warn('safeFetchJson error', err);
+        return null;
+      }
+    };
 
     console.log('[RecentActivities] Received from backend:', activities?.length || 0, 'activities');
 

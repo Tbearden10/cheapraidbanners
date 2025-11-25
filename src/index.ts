@@ -14,6 +14,8 @@ import {
 
 import { promisePool } from './processors/memberStatsProcessor';
 
+const FRONTEND_ORIGIN = 'https://cheapraidbanners.com';
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -197,9 +199,13 @@ export default {
 
     try {
 
+      const publicGetPaths = new Set(['/members', '/stats', '/activity-history', '/recent-activities', '/pgcr']);
+
       // Check auth for all endpoints (simple check)
-      if (!isAuthenticated(request, env)) {
-        return jsonResponse({ error: 'Unauthorized' }, 401);
+      if (!(request.method === 'GET' && publicGetPaths.has(url.pathname))) {
+        if (!isAuthenticated(request, env)) {
+          return jsonResponse({ error: 'Unauthorized' }, 401);
+        }
       }
 
       // GET /members?active=true|false
