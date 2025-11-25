@@ -43,7 +43,7 @@ function normalizeStatsResponse(resp) {
   if (Array.isArray(resp.members) && resp.members.length > 0) {
     for (const m of resp.members) {
       // membership id may be membershipId or membership_id
-      const membershipId = String(m.membershipId ?? m.membership_id ?? '');
+      const membershipId = String(m.destinyUserInfo.membershipId ?? m.membership_id ?? '');
       let memberFull = 0;
       let memberPlay = 0;
 
