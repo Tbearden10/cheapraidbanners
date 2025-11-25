@@ -76,13 +76,15 @@ export async function fetchClanRoster(clanId: string, apiKey: string) {
   const data = await response.json();
   const results = data.Response?.results || [];
 
-  return results.map((r: any) => ({
-    membershipId: r.destinyUserInfo?.membershipId,
-    membershipType: r.destinyUserInfo?.membershipType,
-    displayName: r.destinyUserInfo?.displayName,
-    isOnline: Boolean(r.isOnline || false),
-    lastOnlineStatusChange: r.lastOnlineStatusChange ? Number(r.lastOnlineStatusChange) * 1000 : null,
-    joinDate: r.joinDate,
+  return (data?.Response?.results || []).map((result: any) => ({
+    membershipId: result.destinyUserInfo?.membershipId,
+    membershipType: result.destinyUserInfo?.membershipType,
+    displayName: result.destinyUserInfo?.displayName,
+    bungieGlobalDisplayName: result.destinyUserInfo?.bungieGlobalDisplayName,  // ADD THIS
+    bungieGlobalDisplayNameCode: result.destinyUserInfo?.bungieGlobalDisplayNameCode,  // ADD THIS
+    isOnline: result.isOnline,
+    lastOnlineStatusChange: result.lastOnlineStatusChange,
+    joinDate: result.joinDate,
   }));
 }
 

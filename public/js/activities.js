@@ -2,13 +2,7 @@
 // - Backend fetches activity history directly from Bungie API (no DB)
 // - Displays: duration, completion status, and activity image
 
-const ACTIVITIES_TO_DISPLAY = 3;
-
-function safeFetchJson(url) {
-  return fetch(url)
-    .then(r => r.ok ? r.json().catch(() => null) : null)
-    .catch(() => null);
-}
+const ACTIVITIES_TO_DISPLAY = 4;
 
 /**
  * Format seconds into a readable duration string (e.g., "12m 34s")
@@ -33,21 +27,17 @@ async function loadRecentActivities() {
   try {
     container.innerHTML = '<div style="color: var(--chocolate); text-align:center; padding:40px;">Loading recent activities...</div>';
 
-    const safeFetchJson = async (path, fetchOpts) => {
-      const base = (window.__utils?.API_BASE || window.API_BASE || 'https://api.cheapraidbanners.com').replace(/\/$/, '');
-      const url = new URL(path, base).toString();
-      if (window.__utils?.fetchJson) return window.__utils.fetchJson(url);
-      try {
-        const res = await fetch(url, fetchOpts);
-        if (!res.ok) return null;
-        return await res.json().catch(() => null);
-      } catch (err) {
-        console.warn('safeFetchJson error', err);
-        return null;
-      }
-    };
+    // Use the global API_BASE from utils.js
+    const apiBase = window.API_BASE || window.__utils?.API_BASE || 'https://api.cheapraidbanners.com';
+    const url = `${apiBase}/recent-activities`;
+    
+    console.log('[RecentActivities] Fetching from:', url);
 
-    console.log('[RecentActivities] Received from backend:', activities?.length || 0, 'activities');
+    // Use fetchJson helper from utils.js
+    const fetchJsonFn = window.__utils?.fetchJson || window.fetchJson;
+    const activities = await fetchJsonFn(url);
+
+    console.log('[RecentActivities] Received:', activities?.length || 0, 'activities');
 
     if (!activities || !Array.isArray(activities) || activities.length === 0) {
       container.innerHTML = '<div style="color: var(--chocolate); text-align:center; padding:40px;">No recent activities found.</div>';

@@ -9,7 +9,13 @@
 // }
 
 let previousStatsData = null;
-const API_BASE = window.__utils?.API_BASE || 'https://api.cheapraidbanners.com';
+
+/**
+ * Get API base URL - evaluated at runtime, not module load time
+ */
+function getApiBase() {
+  return window.__utils?.API_BASE || window.API_BASE || 'https://api.cheapraidbanners.com';
+}
 
 /**
  * Normalize a backend /stats response into the UI-friendly shape.
@@ -44,7 +50,7 @@ function normalizeStatsResponse(resp) {
   if (Array.isArray(resp.members) && resp.members.length > 0) {
     for (const m of resp.members) {
       // membership id may be membershipId or membership_id
-      const membershipId = String(m.destinyUserInfo.membershipId ?? m.membership_id ?? '');
+      const membershipId = String(m.destinyUserInfo?.membershipId ?? m.membership_id ?? '');
       let memberFull = 0;
       let memberPlay = 0;
 
@@ -178,8 +184,13 @@ function renderStatsLocal(data, forceRender = false) {
  * loadStats - fetch /stats from server, normalize into UI shape, render
  */
 async function loadStats(forceRender = false) {
+  // Get API base at runtime
+  const API_BASE = getApiBase();
+  
   // Attempt server API first
   const statsUrl = new URL('/stats', API_BASE).toString();
+  console.log('[Stats] Fetching from:', statsUrl);
+  
   let raw = await (window.__utils?.fetchJson ? window.__utils.fetchJson(statsUrl) : fetch(statsUrl).then(r => r.ok ? r.json().catch(()=>null) : null).catch(()=>null));
   if (!raw) {
     console.warn('[Stats] /stats returned no data, using client fallback');
@@ -198,17 +209,12 @@ async function loadStats(forceRender = false) {
  * Returns a shape compatible with normalizeStatsResponse
  */
 async function fetchStatsFallback() {
+  const API_BASE = getApiBase();
+  
   // Minimal fallback: show member count and zeros for clears/playtime
-  const membersUrl = new URL('/members', (window.__utils?.API_BASE || window.API_BASE || API_BASE || 'https://api.cheapraidbanners.com')).toString();
+  const membersUrl = new URL('/members', API_BASE).toString();
   const membersResp = await (window.__utils?.fetchJson ? window.__utils.fetchJson(membersUrl) : fetch(membersUrl).then(r => r.ok ? r.json().catch(()=>null) : null).catch(()=>null));
   const members = (membersResp && (membersResp.members || membersResp)) || null;
-  if (!members || members.length === 0) {
-    // try Bungie roster fallback
-    const rosterResp = await fetch(`https://www.bungie.net/Platform/GroupV2/${encodeURIComponent(window.__utils?.CLAN_ID || window.CLAN_ID)}/Members/`, {
-      headers: { 'X-API-Key': env.BUNGIE_API_KEY || window.__utils?.BUNGIE_API_KEY || window.BUNGIE_API_KEY }
-    }).then(r => r.ok ? r.json().catch(() => null) : null).catch(() => null);
-    members = rosterResp?.Response?.results?.map((r) => r.member?.destinyUserInfo) || [];
-  }
 
   const memberCount = members ? members.length : 0;
   return {

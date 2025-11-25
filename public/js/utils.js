@@ -1,5 +1,4 @@
-// url=https://github.com/Tbearden10/dungeon-info-hub/blob/master/workers/static/js/utils.js
-// utils.js - shared helper utilities (updated with config constants)
+// utils.js - shared helper utilities with LOCAL DEV SUPPORT
 // Exposes safe globals for other non-module scripts to use.
 
 (function () {
@@ -7,10 +6,48 @@
   window.$ = function (id) { return document.getElementById(id); };
   window.nf = new Intl.NumberFormat();
 
-  // Expose config values (frontend fallback only)
-  const BUNGIE_API_KEY = env.BUNGIE_API_KEY;
-  const CLAN_ID = env.BUNGIE_CLAN_ID || "5335552";
-  const API_BASE = 'https://api.cheapraidbanners.com'
+  /**
+   * Detect if we're running locally
+   * - Check for localhost/127.0.0.1 in hostname
+   * - Check for common local dev ports
+   */
+  function isLocalDevelopment() {
+    const hostname = window.location.hostname;
+    const port = window.location.port;
+    
+    // Check for localhost or 127.0.0.1
+    if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      return true;
+    }
+    
+    // Check for common Wrangler dev ports (8787, 8788, etc.)
+    if (port && parseInt(port) >= 8787 && parseInt(port) <= 8799) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  /**
+   * Get API base URL based on environment
+   * - Local dev: Use same origin (no separate API subdomain)
+   * - Production: Use api.cheapraidbanners.com
+   */
+  function getApiBase() {
+    if (isLocalDevelopment()) {
+      // In local dev, backend and frontend are on same origin
+      // e.g., http://localhost:8787
+      return window.location.origin;
+    }
+    
+    // Production API subdomain
+    return 'https://api.cheapraidbanners.com';
+  }
+
+  // Expose config values
+  const API_BASE = getApiBase();
+  const BUNGIE_API_KEY = typeof env !== 'undefined' ? env.BUNGIE_API_KEY : null;
+  const CLAN_ID = typeof env !== 'undefined' ? (env.BUNGIE_CLAN_ID || "5335552") : "5335552";
 
   // Helper functions (declared to be available on window)
   window.escapeHtml = function (text) {
@@ -87,7 +124,7 @@
     return ROLE_INFO[type] || { label: 'Member', color: '#4169e1', priority: 0 };
   };
 
-  // Export a convenient namespace too
+  // Export a convenient namespace with ALL config values
   window.__utils = {
     $: window.$,
     nf: window.nf,
@@ -98,7 +135,15 @@
     fetchJson: window.fetchJson,
     animateCounter: window.animateCounter,
     getRoleInfo: window.getRoleInfo,
-    BUNGIE_API_KEY,
-    CLAN_ID
+    API_BASE: API_BASE,
+    BUNGIE_API_KEY: BUNGIE_API_KEY,
+    CLAN_ID: CLAN_ID,
+    isLocalDevelopment: isLocalDevelopment  // Expose for debugging
   };
+
+  // Also expose directly on window for backward compatibility
+  window.API_BASE = API_BASE;
+  
+  const envLabel = isLocalDevelopment() ? '🔧 LOCAL DEV' : '🌐 PRODUCTION';
+  console.log(`[Utils] ${envLabel} - API_BASE:`, API_BASE);
 })();
