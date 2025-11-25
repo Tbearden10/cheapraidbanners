@@ -65,7 +65,7 @@ export interface Env {
   RUN_TRACKER: DurableObjectNamespace;
   BUNGIE_API_KEY: string;
   BUNGIE_CLAN_ID: string;
-  ADMIN_TOKEN?: string;
+  API_TOKEN: string;
   [key: string]: any;
 }
 

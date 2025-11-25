@@ -61,3 +61,8 @@ crons = [
   "*/30 * * * *",    # Member sync (every 30 min)
   "0 */6 * * *"      # Stats sync (every 6 hours)
 ]
+
+# Routes
+[[routes]]
+pattern = "api.cheapraidbanners.com/*"
+zone_name = "cheapraidbanners.com"

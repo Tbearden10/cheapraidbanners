@@ -2,7 +2,7 @@
 // - Backend fetches activity history directly from Bungie API (no DB)
 // - Displays: duration, completion status, and activity image
 
-const ACTIVITIES_TO_DISPLAY = 5;
+const ACTIVITIES_TO_DISPLAY = 3;
 
 function safeFetchJson(url) {
   return fetch(url)

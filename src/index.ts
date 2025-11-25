@@ -17,7 +17,7 @@ import { promisePool } from './processors/memberStatsProcessor';
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, x-admin-token',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
 function jsonResponse(data: unknown, status = 200) {
@@ -26,6 +26,17 @@ function jsonResponse(data: unknown, status = 200) {
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
   });
 }
+
+function isAuthenticated(request: Request, env: Env): boolean {
+  if (env.ENVIRONMENT === 'dev') return true; // bypass for local dev
+
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader) return false;
+
+  const token = authHeader.replace('Bearer ', '');
+  return token === env.API_TOKEN;
+}
+
 
 /** Member sync cron: update clan_members and handle left members by removing their DB rows */
 async function memberSyncCron(env: Env) {
@@ -185,6 +196,12 @@ export default {
     }
 
     try {
+
+      // Check auth for all endpoints (simple check)
+      if (!isAuthenticated(request, env)) {
+        return jsonResponse({ error: 'Unauthorized' }, 401);
+      }
+
       // GET /members?active=true|false
       if (url.pathname === '/members' && request.method === 'GET') {
         const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
@@ -270,9 +287,9 @@ export default {
        */
       if (url.pathname === '/recent-activities' && request.method === 'GET') {
         const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
-        const MEMBERS_TO_CHECK = 5;
-        const ACTIVITIES_PER_MEMBER = 3;
-        const TOTAL_ACTIVITIES = 5;
+        const MEMBERS_TO_CHECK = 10;
+        const ACTIVITIES_PER_MEMBER = 2;
+        const TOTAL_ACTIVITIES = 3;
 
         try {
           // 1) Fetch clan roster directly from Bungie API (no DB)
@@ -393,11 +410,6 @@ export default {
 
       // POST /admin/refresh  -> body: { type: 'members'|'stats'|'all' }
       if (url.pathname === '/admin/refresh' && request.method === 'POST') {
-        const token = request.headers.get('x-admin-token');
-        if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
-          return jsonResponse({ error: 'Unauthorized' }, 401);
-        }
-
         const body = await request.json().catch(() => ({} as any));
         const type = (body.type as string) || 'all';
         const results: Record<string, unknown> = {};
@@ -414,10 +426,6 @@ export default {
 
       // Admin recompute (legacy path) POST /admin/recompute
       if (url.pathname === '/admin/recompute' && request.method === 'POST') {
-        const token = request.headers.get('x-admin-token');
-        if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
-          return jsonResponse({ error: 'Unauthorized' }, 401);
-        }
         const body = await request.json().catch(() => ({} as any));
         const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
         await (await import('./db/aggregateHelpers')).recomputeClanAggregateStats(env.DB, clanId);
