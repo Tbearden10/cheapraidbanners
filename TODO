@@ -9,3 +9,5 @@ click player to see dungeon breakdown
 fix last updated to go on endpoint responsec
 cors fix
 cookie icon
+env not defined utils
+updateStats ttype error
