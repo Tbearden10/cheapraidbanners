@@ -1,5 +1,5 @@
 # cheapraidbanners.com
 
-Just a friendly site I made for a gaming group I am a part of
+Just a friendly site I made for some friends!
 
-We are a highly skilled speedrunning group that loves cookies!
+'cheapraidbanners.com' is a highly skilled speedrunning group that loves cookies!
