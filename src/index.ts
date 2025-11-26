@@ -634,13 +634,38 @@ export default {
   },
 
   async scheduled(event: any, env: Env) {
-    console.log('[Cron] Triggered:', event.cron);
+    console.log('[Cron] Triggered:', event.cron, 'scheduledTime:', event.scheduledTime);
+    
     try {
-      if (typeof event.cron === 'string' && event.cron.includes('*/30')) {
-        await memberSyncCron(env);
-      } else if (typeof event.cron === 'string' && event.cron.includes('*/6')) {
+      const cronString = event.cron || '';
+      
+      // More specific pattern matching - check stats sync first (more specific)
+      if (cronString.includes('0 */6')) {
+        console.log('[Cron] Running stats sync (every 6 hours)');
         await statsSyncCron(env);
+      } 
+      // Then check member sync
+      else if (cronString.includes('*/30')) {
+        console.log('[Cron] Running member sync (every 30 min)');
+        await memberSyncCron(env);
       }
+      // Fallback: if cron string doesn't match, determine by time
+      else {
+        const now = new Date(event.scheduledTime || Date.now());
+        const minutes = now.getMinutes();
+        const hours = now.getHours();
+        
+        // Stats sync runs at minute 0 every 6 hours
+        if (minutes === 0 && hours % 6 === 0) {
+          console.log('[Cron] Running stats sync (fallback time-based detection)');
+          await statsSyncCron(env);
+        } else {
+          console.log('[Cron] Running member sync (fallback)');
+          await memberSyncCron(env);
+        }
+      }
+      
+      console.log('[Cron] Completed successfully');
     } catch (err) {
       console.error('[Cron] Error:', err);
     }
