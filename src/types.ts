@@ -78,6 +78,9 @@ export interface ClanMemberRow {
   display_name: string;
   is_online: number;
   last_online_status_change?: number | null;
+  last_online_status_change_prev?: number | null;               // added
+  last_online_status_change_resolved?: number | null;           // added
+  last_online_status_change_resolved_prev?: number | null;      // added
   join_date?: string | null;
   emblem_path?: string | null;
   emblem_background_path?: string | null;
@@ -93,6 +96,7 @@ export interface MemberDungeonStatsRow {
   membership_id: string;
   membership_type: number;
   dungeon_hash: string;
+  total_clears?: number;                // added (all completions)
   total_full_clears: number;
   total_playtime_seconds: number;
   last_processed_date?: string | null;
@@ -104,6 +108,7 @@ export interface ClanAggregateStatsRow {
   id?: number;
   clan_id: string;
   dungeon_hash: string;
+  total_clears?: number;                // added (all completions)
   total_full_clears: number;
   total_playtime_seconds: number;
   active_member_count: number;

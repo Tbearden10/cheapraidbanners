@@ -10,6 +10,7 @@ import {
   getClanAggregateStats,
 } from './db/queries';
 import { promisePool } from './processors/memberStatsProcessor';
+import { resolveLastOnlineStatusChangeToMs } from './utils/lastOnlineResolver';
 
 // CORS Configuration
 function getCorsHeaders(request: Request, env: Env) {
@@ -104,19 +105,28 @@ function checkRateLimit(identifier: string, maxRequests = 100, windowMs = 60000)
   return true;
 }
 
-/** Member sync cron */
-async function memberSyncCron(env: Env) {
+// Enhanced memberSyncCron that tracks member activity changes
+// Key improvements:
+// 1. Detect if member played since last sync (lastOnlineStatusChange resolved differs)
+// 2. Store previous lastOnlineStatusChange and previous resolved timestamp to enable smart queue filtering
+// 3. Only queue members who have actually played since last processing
+/** 
+ * Member sync cron with activity tracking
+ */
+export async function memberSyncCron(env: Env) {
   const clanId = env.BUNGIE_CLAN_ID;
-  console.log('[MemberSync] fetching roster for clan', clanId);
+  console.log('[MemberSync] Fetching roster for clan', clanId);
   
   const roster = (await fetchClanRoster(clanId, env.BUNGIE_API_KEY)) || [];
   const dbMembers = await getMembersList(env.DB, clanId, false);
+  
   const dbMemberIds = new Set(dbMembers.map((m) => m.membership_id));
   const rosterMemberIds = new Set((roster || []).map((m: any) => m.membershipId));
 
   const newMembers = (roster || []).filter((m: any) => !dbMemberIds.has(m.membershipId));
   const leftMembers = dbMembers.filter((m) => !rosterMemberIds.has(m.membership_id));
 
+  // Enrich roster with emblem data
   const ENRICH_CONC = Number((env as any).ENRICH_CONCURRENCY) || 4;
   const enriched: any[] = [];
   
@@ -127,48 +137,125 @@ async function memberSyncCron(env: Env) {
         const e = await enrichMemberWithEmblem(member, env.BUNGIE_API_KEY);
         enriched.push(e);
       } catch (err) {
-        console.warn('[MemberSync] enrich failed', member.membershipId, err);
-        enriched.push({ ...member, emblemPath: null, emblemBackgroundPath: null });
+        console.warn('[MemberSync] Enrich failed', member.membershipId, err);
+        enriched.push({
+          ...member,
+          emblemPath: null,
+          emblemBackgroundPath: null,
+        });
       }
       return null;
     },
     ENRICH_CONC
   );
 
+  // Count online members from the enriched roster
+  const onlineCount = enriched.reduce((acc, m) => acc + (m?.isOnline ? 1 : 0), 0);
+
+  // Track activity changes for logging
+  let membersWithActivityChange = 0;
+
+  // Upsert members with activity tracking
   await promisePool(
     enriched,
     async (member: any) => {
       const bungieGlobalDisplayName = member.bungieGlobalDisplayName || member.displayName;
       const bungieGlobalDisplayNameCode = member.bungieGlobalDisplayNameCode;
-      const displayName = bungieGlobalDisplayNameCode 
-        ? `${bungieGlobalDisplayName}#${bungieGlobalDisplayNameCode}` 
+      const displayName = bungieGlobalDisplayNameCode
+        ? `${bungieGlobalDisplayName}#${bungieGlobalDisplayNameCode}`
         : bungieGlobalDisplayName;
 
-      await upsertClanMember(env.DB, {
-        clanId,
-        membershipId: member.membershipId,
-        membershipType: Number(member.membershipType),
-        displayName: displayName,
-        isOnline: Boolean(member.isOnline),
-        lastOnlineStatusChange: member.lastOnlineStatusChange ?? null,
-        joinDate: member.joinDate ?? null,
-        emblemPath: member.emblemPath ?? null,
-        emblemBackgroundPath: member.emblemBackgroundPath ?? null,
-        isActive: true,
-      });
+      // Find existing
+      const existingMember = dbMembers.find((m) => m.membership_id === member.membershipId);
+
+      // Resolve raw -> canonical ms timestamp
+      const resolvedTs = resolveLastOnlineStatusChangeToMs(member.lastOnlineStatusChange ?? null);
+      const prevResolvedFromDb = existingMember?.last_online_status_change_resolved ?? null;
+      const prevRawFromDb = existingMember?.last_online_status_change ?? null;
+      const prevResolved = prevResolvedFromDb ?? null;
+
+      // Decide activity change:
+      // - If existing missing -> true
+      // - If both resolved exist -> compare resolved ms
+      // - Else fallback to comparing raw values (string/number) as before
+      let hasActivityChange = true;
+      if (existingMember) {
+        if (resolvedTs !== null && prevResolved !== null) {
+          hasActivityChange = resolvedTs !== prevResolved;
+        } else {
+          // fallback: compare raw values (Bungie usually gives epoch seconds)
+          hasActivityChange = String(existingMember.last_online_status_change) !== String(member.lastOnlineStatusChange);
+        }
+      } else {
+        hasActivityChange = true;
+      }
+
+      if (hasActivityChange) {
+        membersWithActivityChange++;
+      }
+
+      // Store previous raw value passed in bind - DB DO UPDATE will set *_prev values when updating
+      const now = Date.now();
+
+      try {
+        await env.DB.prepare(`
+          INSERT INTO clan_members (
+            clan_id, membership_id, membership_type, display_name,
+            is_online, last_online_status_change, last_online_status_change_prev,
+            last_online_status_change_resolved, last_online_status_change_resolved_prev,
+            join_date, emblem_path, emblem_background_path, is_active,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(clan_id, membership_id)
+          DO UPDATE SET
+            display_name = excluded.display_name,
+            is_online = excluded.is_online,
+            last_online_status_change_prev = clan_members.last_online_status_change,
+            last_online_status_change = excluded.last_online_status_change,
+            last_online_status_change_resolved_prev = clan_members.last_online_status_change_resolved,
+            last_online_status_change_resolved = excluded.last_online_status_change_resolved,
+            emblem_path = excluded.emblem_path,
+            emblem_background_path = excluded.emblem_background_path,
+            is_active = excluded.is_active,
+            updated_at = excluded.updated_at
+        `).bind(
+          clanId,
+          member.membershipId,
+          Number(member.membershipType),
+          displayName,
+          member.isOnline ? 1 : 0,
+          member.lastOnlineStatusChange ?? null,
+          prevRawFromDb, // previous raw (for inserts this may be null — DO UPDATE sets prev on update)
+          resolvedTs, // resolved ms
+          prevResolved, // previous resolved (for inserts this may be null)
+          member.joinDate ?? null,
+          member.emblemPath ?? null,
+          member.emblemBackgroundPath ?? null,
+          1, // is_active
+          now,
+          now
+        ).run();
+      } catch (err) {
+        console.warn('[MemberSync] DB upsert failed for', member.membershipId, err);
+      }
+
       return null;
     },
     4
   );
 
+  // Handle members who left the clan
   for (const left of leftMembers) {
     try {
+      // Delete their stats (will be recalculated if they rejoin)
       await env.DB.prepare(
         `DELETE FROM member_dungeon_stats WHERE clan_id = ? AND membership_id = ?`
       ).bind(clanId, left.membership_id).run();
 
+      // Mark as inactive (keep record for history)
       await env.DB.prepare(
-        `UPDATE clan_members SET is_active = 0, updated_at = ? WHERE clan_id = ? AND membership_id = ?`
+        `UPDATE clan_members SET is_active = 0, updated_at = ? 
+         WHERE clan_id = ? AND membership_id = ?`
       ).bind(Date.now(), clanId, left.membership_id).run();
 
       console.log('[MemberSync] Removed member', left.membership_id);
@@ -177,11 +264,28 @@ async function memberSyncCron(env: Env) {
     }
   }
 
-  return { success: true, newMembers: newMembers.length, removedMembers: leftMembers.length };
+  console.log(
+    `[MemberSync] Complete: ${newMembers.length} new, ${leftMembers.length} left, ` +
+    `${membersWithActivityChange} with activity changes, ${onlineCount} currently online`
+  );
+
+  return {
+    success: true,
+    newMembers: newMembers.length,
+    removedMembers: leftMembers.length,
+    membersWithActivityChange,
+    online: {
+      count: onlineCount
+    }
+  };
 }
 
-/** Stats sync cron */
-async function statsSyncCron(env: Env) {
+// Smart stats sync that only processes members who have played since last update
+// Key improvements:
+// 1. Filter members based on lastOnlineStatusChange resolved differences
+// 2. Skip members who haven't played since last processing
+// 3. Reduce unnecessary queue load and API calls
+export async function statsSyncCron(env: Env) {
   const clanId = env.BUNGIE_CLAN_ID;
   const members = await getMembersList(env.DB, clanId, true);
   
@@ -190,17 +294,57 @@ async function statsSyncCron(env: Env) {
     return { success: true, queued: 0 };
   }
 
-  const runId = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
+  // Filter to members who have actually played since last processing
+  const membersToProcess = members.filter((member) => {
+    // Always process if we've never processed them (no last_processed_date)
+    if (!member.last_processed_date) {
+      return true;
+    }
+
+    // Prefer resolved timestamps (canonical ms)
+    const currentResolved = (member as any).last_online_status_change_resolved ?? null;
+    const prevResolved = (member as any).last_online_status_change_resolved_prev ?? null;
+
+    if (currentResolved !== null && prevResolved !== null) {
+      return currentResolved !== prevResolved;
+    }
+
+    // Fallback: compare raw last_online_status_change values as string
+    const currentRaw = member.last_online_status_change ?? null;
+    const prevRaw = (member as any).last_online_status_change_prev ?? null;
+    if (prevRaw === null || prevRaw === undefined) {
+      return true;
+    }
+    return String(currentRaw) !== String(prevRaw);
+  });
+
+  console.log(
+    `[StatsSync] Filtered: ${members.length} total → ${membersToProcess.length} with activity`
+  );
+
+  if (membersToProcess.length === 0) {
+    console.log('[StatsSync] No members with recent activity, skipping queue');
+    return { success: true, queued: 0, filtered: members.length };
+  }
+
+  const runId = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   
+  // Initialize RunTracker with filtered count
   try {
     const trackerId = env.RUN_TRACKER.idFromName(`run-tracker-${clanId}`);
     const tracker = env.RUN_TRACKER.get(trackerId);
     await tracker.fetch('https://internal/init', {
       method: 'POST',
-      body: JSON.stringify({ runId, clanId, expectedCount: members.length }),
+      body: JSON.stringify({
+        runId,
+        clanId,
+        expectedCount: membersToProcess.length,
+      }),
       headers: { 'Content-Type': 'application/json' },
     });
-    console.log(`[StatsSync] initialized RunTracker for run ${runId} expected=${members.length}`);
+    console.log(
+      `[StatsSync] Initialized RunTracker for run ${runId} expected=${membersToProcess.length}`
+    );
   } catch (err) {
     console.warn('[StatsSync] Failed to init RunTracker', err);
   }
@@ -209,7 +353,7 @@ async function statsSyncCron(env: Env) {
   let queued = 0;
 
   await promisePool(
-    members,
+    membersToProcess,
     async (member) => {
       try {
         await env.MEMBER_STATS_QUEUE.send({
@@ -222,15 +366,29 @@ async function statsSyncCron(env: Env) {
         });
         queued++;
       } catch (err) {
-        console.warn('[StatsSync] Failed to send queue message for', member.membership_id, err);
+        console.warn(
+          '[StatsSync] Failed to send queue message for',
+          member.membership_id,
+          err
+        );
       }
       return null;
     },
     sendConcurrency
   );
 
-  console.log('[StatsSync] queued', queued, 'members for run', runId);
-  return { success: true, queued, runId };
+  console.log(
+    `[StatsSync] Queued ${queued}/${membersToProcess.length} members for run ${runId} ` +
+    `(filtered out ${members.length - membersToProcess.length} inactive)`
+  );
+
+  return {
+    success: true,
+    queued,
+    runId,
+    totalMembers: members.length,
+    filteredOut: members.length - membersToProcess.length,
+  };
 }
 
 /** Helper: fetch all member stats grouped */
@@ -318,6 +476,7 @@ export default {
           },
           isOnline: Boolean(member.is_online),
           lastOnlineStatusChange: member.last_online_status_change ?? null,
+          lastOnlineStatusChangeResolved: (member as any).last_online_status_change_resolved ?? null,
           emblemPath: member.emblem_path ?? null,
           emblemBackgroundPath: member.emblem_background_path ?? null,
           stats: statsByMember.get(member.membership_id) || [],
@@ -369,9 +528,9 @@ export default {
       // GET /recent-activities
       if (url.pathname === '/recent-activities' && request.method === 'GET') {
         const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
-        const MEMBERS_TO_CHECK = 5;
-        const ACTIVITIES_PER_MEMBER = 2;
-        const TOTAL_ACTIVITIES = 5;
+        const MEMBERS_TO_CHECK = 10;
+        const ACTIVITIES_PER_MEMBER = 1;
+        const TOTAL_ACTIVITIES = 3;
 
         try {
           const roster = await fetchClanRoster(clanId, env.BUNGIE_API_KEY);
@@ -382,9 +541,10 @@ export default {
           const sorted = roster
             .filter((m: any) => m.membershipId && m.membershipType)
             .sort((a: any, b: any) => {
-              const aTs = a.lastOnlineStatusChange || 0;
-              const bTs = b.lastOnlineStatusChange || 0;
-              return bTs - aTs;
+              // prefer interpreted ms if available, fallback to raw numeric
+              const aMs = resolveLastOnlineStatusChangeToMs(a.lastOnlineStatusChange) ?? Number(a.lastOnlineStatusChange) ?? 0;
+              const bMs = resolveLastOnlineStatusChangeToMs(b.lastOnlineStatusChange) ?? Number(b.lastOnlineStatusChange) ?? 0;
+              return bMs - aMs;
             })
             .slice(0, MEMBERS_TO_CHECK);
 
@@ -589,14 +749,31 @@ export default {
 
     const queueConcurrency = Number((env as any).QUEUE_PROCESS_CONCURRENCY) || 2;
 
+    // PRELOAD the memberStatsProcessor module once so the dynamic import doesn't
+    // serialize per-worker execution. This ensures workers can start work
+    // in parallel immediately rather than waiting for repeated module loads.
+    let processMemberStats: any = null;
+    try {
+      const mod = await import('./processors/memberStatsProcessor');
+      processMemberStats = mod.processMemberStats;
+    } catch (e) {
+      console.warn('[Queue] Failed to preload memberStatsProcessor, will import per-message', e);
+    }
+
     await promisePool(
       batch.messages,
       async (message: any) => {
         try {
           const job = message.body as any;
-          console.log(`[Queue] Processing member: ${job.displayName}`);
+          // Log immediate start so you can see two "START" lines when concurrency > 1
+          console.log(`[Queue] START processing member: ${job.displayName} (${job.membershipId}) at ${new Date().toISOString()}`);
 
-          const { processMemberStats } = await import('./processors/memberStatsProcessor');
+          // If preload failed above, fall back to importing inside worker (cached by the platform)
+          if (!processMemberStats) {
+            const mod = await import('./processors/memberStatsProcessor');
+            processMemberStats = mod.processMemberStats;
+          }
+
           await processMemberStats(env, job);
 
           if (job.runId && env.RUN_TRACKER) {

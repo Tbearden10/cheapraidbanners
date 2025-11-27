@@ -4,9 +4,7 @@
   "private": true,
   "scripts": {
     "build": "echo 'Frontend is static' && exit 0",
-    "dev": "wrangler dev --local --assets ./public",
-    "deploy-worker": "wrangler deploy",
-    "deploy-pages": "wrangler pages deploy ./public --project-name cheapraidbanners"
+    "dev": "wrangler dev --local --assets ./public --env dev"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251125.0",

@@ -3,66 +3,116 @@ compatibility_date = "2025-10-25"
 main = "src/index.ts"
 account_id = "5e7fb995b74586d322a72a99770b31dc"
 
-# Environment variables - tuning knobs for concurrency and throttling
+# Environment variables - Production-optimized settings
 [vars]
+# ===== CORE SETTINGS =====
+ENVIRONMENT = "production"
+# Add these as secrets via: wrangler secret put BUNGIE_API_KEY
+# Add these as secrets via: wrangler secret put API_TOKEN
+# Add these as vars: BUNGIE_CLAN_ID = "your-clan-id"
 
-# Concurrency & batching knobs (tune these without changing code)
-BUNGIE_FETCH_CONCURRENCY = "8"
-BATCH_PROCESS_CONCURRENCY = "5"
-QUEUE_PROCESS_CONCURRENCY = "5"
-QUEUE_SEND_CONCURRENCY = "6"
-BATCH_SIZE = "25"
-PREFETCH_BATCH_WINDOW = "2"
-MAX_PREFETCH_ITEMS_PER_WINDOW = "200"
-DUNGEON_PROCESS_CONCURRENCY = "2"
-ENRICH_CONCURRENCY = "6"
-MAX_RUN_ACTIVITIES = "5000"
+# ===== CONCURRENCY SETTINGS =====
+# Member sync (roster enrichment)
+ENRICH_CONCURRENCY = "6"                    # Parallel emblem fetches during member sync
 
-# Bungie request tuning
-BUNGIE_PER_REQUEST_TIMEOUT_MS = "12000"
-BUNGIE_FETCH_RETRIES = "2"
-BUNGIE_FETCH_BACKOFF_MS = "400"
-DO_THRESHOLD = "1"
-ACTIVITY_THRESHOLD = "100"
+# Stats sync (queue management)
+QUEUE_SEND_CONCURRENCY = "8"                # Parallel queue sends (members → queue)
+QUEUE_PROCESS_CONCURRENCY = "1"             # Process 1 member at a time (SEQUENTIAL)
+                                            # NOTE: Must match max_batch_size in [[queues.consumers]]
 
+# Per-member processing
+DUNGEON_PROCESSING_CONCURRENCY = "5"        # Process 5 dungeons in parallel per member
+
+# PGCR verification (SEQUENTIAL like dungeon-info-hub)
+PGCR_BATCH_SIZE = "50"                      # Items per batch to BatchCoordinator
+PGCR_DELAY_MS = "50"                        # Delay between sequential PGCR requests (milliseconds)
+PGCR_BATCH_CONCURRENCY = "5"
+
+# ===== BUNGIE API SETTINGS =====
+BUNGIE_PER_REQUEST_TIMEOUT_MS = "15000"     # 15s timeout per request
+BUNGIE_FETCH_RETRIES = "3"                  # Retry attempts on failure
+BUNGIE_FETCH_BACKOFF_MS = "400"             # Base backoff delay (exponential)
+
+# ===== D1 DATABASE =====
 [[d1_databases]]
 binding = "DB"
 database_name = "clan-stats"
 database_id = "b1e78f39-6cba-4c21-a822-95e4634d6370"
 
-# Queue Binding - Member Stats Processing
+# ===== QUEUE CONFIGURATION =====
 [[queues.producers]]
 binding = "MEMBER_STATS_QUEUE"
 queue = "member-stats-queue"
 
 [[queues.consumers]]
 queue = "member-stats-queue"
-max_batch_size = 8
-max_batch_timeout = 5
-max_retries = 3
+max_batch_size = 1              # Process 1 member per batch (SEQUENTIAL)
+max_batch_timeout = 30          # Wait 30s to fill batch
+max_retries = 3                 # Retry failed members 3 times
 dead_letter_queue = "member-stats-dlq"
 
-# Durable Object bindings
+# ===== DURABLE OBJECTS =====
 [[durable_objects.bindings]]
 name = "BATCH_COORDINATOR"
 class_name = "BatchCoordinator"
+# Used for: PGCR batch coordination and result aggregation
 
 [[durable_objects.bindings]]
 name = "RUN_TRACKER"
 class_name = "RunTracker"
+# Used for: Tracking stats sync completion and triggering aggregate recompute
 
 [[migrations]]
 tag = "v1"
 new_classes = ["BatchCoordinator", "RunTracker"]
 
-# Cron Triggers
+# ===== CRON TRIGGERS =====
 [triggers]
 crons = [
-  "*/30 * * * *",    # Member sync (every 30 min)
-  "0 */6 * * *"      # Stats sync (every 6 hours)
+  "*/30 * * * *",    # Member sync: every 30 minutes
+  "0 */6 * * *"      # Stats sync: every 6 hours (at 00:00, 06:00, 12:00, 18:00 UTC)
 ]
 
-# Routes
+# ===== ROUTES =====
 [[routes]]
 pattern = "api.cheapraidbanners.com/*"
 zone_name = "cheapraidbanners.com"
+
+# ===== OPTIONAL: Development Environment Override =====
+[env.dev]
+[env.dev.vars]
+ENVIRONMENT = "dev"
+ENRICH_CONCURRENCY = "2"
+QUEUE_SEND_CONCURRENCY = "2"
+QUEUE_PROCESS_CONCURRENCY = "1"
+DUNGEON_PROCESSING_CONCURRENCY = "5"
+PGCR_BATCH_SIZE = "50"
+PGCR_DELAY_MS = "50"
+PGCR_BATCH_CONCURRENCY = "5"
+BUNGIE_PER_REQUEST_TIMEOUT_MS = "15000"
+BUNGIE_FETCH_RETRIES = "3"
+
+[[env.dev.d1_databases]]
+binding = "DB"
+database_name = "clan-stats-local"
+database_id = "fe0acf69-ffd3-4c6c-879f-f928ecec0f2c"
+
+[[env.dev.queues.producers]]
+binding = "MEMBER_STATS_QUEUE"
+queue = "member-stats-queue-local"
+
+[[env.dev.queues.consumers]]
+queue = "member-stats-queue-local"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "member-stats-dlq-local"
+
+# Durable Objects (same bindings, local instances)
+[[env.dev.durable_objects.bindings]]
+name = "BATCH_COORDINATOR"
+class_name = "BatchCoordinator"
+
+[[env.dev.durable_objects.bindings]]
+name = "RUN_TRACKER"
+class_name = "RunTracker"

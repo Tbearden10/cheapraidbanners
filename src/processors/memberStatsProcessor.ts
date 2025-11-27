@@ -1,27 +1,24 @@
-// Hybrid member stats processor (patched with coordinator result retries and better logging)
-// - Inline for small runs
-// - DO for heavy runs
-// - Retries GET /result on coordinator when it returns 408 (timeout)
+// Production-ready member stats processor with SEQUENTIAL PGCR processing
+// Matches dungeon-info-hub architecture for safe rate limit compliance
 
 import type { Env, MemberJob } from '../types';
 import { ACTIVITY_REFERENCE_MAP } from '../constants/activityReferenceMap';
 import { fetchCharactersForMember, fetchActivitiesForCharacter, fetchPGCR } from '../api/bungieApi';
 import { upsertMemberDungeonStats } from '../db/queries';
 import { applyClanAggregateDelta } from '../db/aggregateHelpers';
-import { withRateLimit } from './rateLimit';
 
-// Promise pool helper (unchanged)
-export async function promisePool<T, R>(items: T[], worker: (item: T, idx: number) => Promise<R>, concurrency: number): Promise<R[]> {
+// Worker pool for parallel execution
+export async function promisePool<T, R>(items: T[], worker: (item: T) => Promise<R>, concurrency: number) {
   const results: R[] = new Array(items.length);
-  let idx = 0;
+  let i = 0;
   const runners = new Array(Math.min(concurrency, items.length)).fill(0).map(async () => {
     while (true) {
-      const i = idx++;
-      if (i >= items.length) return;
+      const idx = i++;
+      if (idx >= items.length) return;
       try {
-        results[i] = await worker(items[i], i);
+        results[idx] = await worker(items[idx]);
       } catch (err) {
-        (results as any)[i] = undefined;
+        (results as any)[idx] = undefined as any;
       }
     }
   });
@@ -38,417 +35,562 @@ function determineClearType(pgcrResponse: any, period: string): boolean {
   if (!pgcrResponse || !period) return false;
   const timestamp = Date.parse(period);
   if (isNaN(timestamp)) return false;
-  const HAUNTED_START_MS = Date.parse('2022-05-24T17:00:00.000Z');
-  const WITCH_QUEEN_START_MS = Date.parse('2022-02-22T17:00:00.000Z');
-  const BEYOND_LIGHT_START_MS = Date.parse('2020-11-10T17:00:00.000Z');
-  if (timestamp >= HAUNTED_START_MS) return Boolean(pgcrResponse.activityWasStartedFromBeginning);
-  if (timestamp < BEYOND_LIGHT_START_MS) {
-    const startingPhaseIndex = pgcrResponse.startingPhaseIndex;
-    return startingPhaseIndex === 0;
-  }
-  if (timestamp >= WITCH_QUEEN_START_MS) return Boolean(pgcrResponse.activityWasStartedFromBeginning);
+  const HAUNTED_START = Date.parse('2022-05-24T17:00:00.000Z');
+  const WITCH_QUEEN_START = Date.parse('2022-02-22T17:00:00.000Z');
+  const BEYOND_LIGHT_START = Date.parse('2020-11-10T17:00:00.000Z');
+
+  if (timestamp >= HAUNTED_START) return Boolean(pgcrResponse.activityWasStartedFromBeginning);
+  if (timestamp < BEYOND_LIGHT_START) return pgcrResponse.startingPhaseIndex === 0;
+  if (timestamp >= WITCH_QUEEN_START) return Boolean(pgcrResponse.activityWasStartedFromBeginning);
   return true;
 }
 
-async function fetchPgcrWithRetries(instanceId: string, env: Env) {
-  const baseBackoff = getEnvNumber(env, 'BUNGIE_FETCH_BACKOFF_MS', 500);
-  const retries = getEnvNumber(env, 'BUNGIE_FETCH_RETRIES', 2);
-  return withRateLimit(() => fetchPGCR(instanceId, env.BUNGIE_API_KEY), baseBackoff, retries).catch((err) => {
-    console.warn(`fetchPGCR ${instanceId} failed:`, err?.message ?? err);
-    return null;
-  });
+function isCompletedSearchContext(a: any): boolean {
+  return !!(a?.values?.completed?.basic?.value === 1);
 }
 
-/** Helper to build a deterministic DO name for a member (per-member DO) */
-function makeCoordinatorName(membershipId: string) {
-  return `member-${membershipId}`;
-}
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Process a batch using prefetch map or network-only */
-async function processBatchUsingMap(batchItems: { instanceId: string; period: string; playtime: number }[], env: Env, prefetchMap: Map<string, any | null> | undefined, concurrency: number) {
-  let requested = 0, success = 0, totalLatency = 0;
-  const results = await promisePool(
-    batchItems,
-    async (item) => {
-      requested++;
-      const start = Date.now();
-      let pgcr = prefetchMap && prefetchMap.has(item.instanceId) ? prefetchMap.get(item.instanceId) : undefined;
-      if (pgcr === undefined) {
-        pgcr = await fetchPgcrWithRetries(item.instanceId, env);
-      }
-      const took = Date.now() - start;
-      if (pgcr) { success++; totalLatency += took; }
-      const isFull = pgcr ? determineClearType(pgcr, item.period) : false;
-      return { instanceId: item.instanceId, isFull, playtime: item.playtime, period: item.period };
-    },
-    concurrency
-  );
-  const avgLatency = success ? Math.round(totalLatency / success) : 0;
-  console.log(`PGCR batch requested=${requested} success=${success} avgLatency=${avgLatency}ms`);
-  let fullClears = 0, playtimeSeconds = 0, lastActivityDate: string | null = null;
-  for (const r of results) {
-    if (!r) continue;
-    if (r.isFull) fullClears++;
-    playtimeSeconds += r.playtime || 0;
-    if (!lastActivityDate || (r.period && r.period > lastActivityDate)) lastActivityDate = r.period;
+/**
+ * Public: entrypoint used by the queue/job runner
+ * Processes dungeons in parallel with proper concurrency limits
+ */
+export async function processMemberStats(env: Env, job: MemberJob): Promise<void> {
+  const start = Date.now();
+  console.log(`\n=== processMemberStats ${job.displayName} ${job.membershipId} ===`);
+
+  // 1) Fetch characters (do NOT filter out deleted)
+  const characters = await fetchCharactersForMember(job.membershipId, job.membershipType, env.BUNGIE_API_KEY);
+  if (!characters || characters.length === 0) {
+    console.log('No characters found, skipping');
+    return;
   }
-  return { fullClears, playtimeSeconds, lastActivityDate };
-}
+  const characterIds = characters.map((c: any) => String(c.characterId));
+  console.log(`Found characters: ${characterIds.join(',')}`);
 
-async function processBatchNetworkOnly(batchItems: { instanceId: string; period: string; playtime: number }[], env: Env, concurrency: number) {
-  return processBatchUsingMap(batchItems, env, undefined as any, concurrency);
-}
+  // 2) Fetch ALL activities across all characters (parallel, per-character pagination)
+  const perCharActivities = await fetchAllActivitiesForAllChars(job.membershipType, job.membershipId, characterIds, env.BUNGIE_API_KEY);
 
-/** Prefetch helper (unchanged) */
-async function prefetchInstanceWindow(instanceIds: string[], env: Env, outMap: Map<string, any | null>, concurrency: number, maxItems: number) {
-  const toFetch = instanceIds.slice(0, maxItems);
+  // 3) Merge and annotate with characterId
+  const merged: any[] = [];
+  for (const charId of Object.keys(perCharActivities)) {
+    const arr = perCharActivities[charId] || [];
+    for (const a of arr) {
+      merged.push({ ...a, characterId: a.characterId ?? charId });
+    }
+  }
+  console.log(`Merged activities across characters: ${merged.length}`);
+
+  // 4) Build dungeon buckets and dedupe per-dungeon by instanceId
+  const activitiesByDungeon: Record<string, any[]> = {};
+  for (const d of ACTIVITY_REFERENCE_MAP) activitiesByDungeon[String(d.hash)] = [];
+
+  for (const a of merged) {
+    const ref = a?.activityDetails?.referenceId || a?.activityHash || a?.referenceId;
+    if (!ref) continue;
+    for (const d of ACTIVITY_REFERENCE_MAP) {
+      if ((d.referenceIds || []).includes(String(ref))) {
+        activitiesByDungeon[String(d.hash)].push(a);
+        break;
+      }
+    }
+  }
+
+  // Deduplicate per-dungeon by instanceId (prefer completed)
+  for (const hash of Object.keys(activitiesByDungeon)) {
+    const map = new Map<string, any>();
+    for (const act of activitiesByDungeon[hash]) {
+      const id = act.activityDetails?.instanceId || act.instanceId;
+      if (!id) continue;
+      const existing = map.get(id);
+      if (!existing) map.set(id, act);
+      else {
+        const existingCompleted = !!(existing?.values?.completed?.basic?.value === 1);
+        const newCompleted = !!(act?.values?.completed?.basic?.value === 1);
+        if (!existingCompleted && newCompleted) map.set(id, act);
+      }
+    }
+    activitiesByDungeon[hash] = Array.from(map.values());
+  }
+
+  // 5) Process dungeons in PARALLEL (with concurrency limit)
+  const dungeonHashes = Object.keys(activitiesByDungeon).filter(h => activitiesByDungeon[h].length > 0);
+  console.log(`Processing ${dungeonHashes.length} dungeon(s) in parallel`);
+
+  const dungeonConcurrency = getEnvNumber(env, 'DUNGEON_PROCESSING_CONCURRENCY', 5);
+  
   await promisePool(
-    toFetch,
-    async (instanceId) => {
-      if (outMap.has(instanceId)) return null;
-      const pgcr = await fetchPgcrWithRetries(instanceId, env);
-      outMap.set(instanceId, pgcr ?? null);
+    dungeonHashes,
+    async (dungeonHash) => {
+      await processOneDungeon(env, job, dungeonHash, activitiesByDungeon[dungeonHash]);
       return null;
     },
-    concurrency
+    dungeonConcurrency
   );
-}
 
-/** Helper: fetch coordinator result with retries on 408 */
-async function fetchCoordinatorResultWithRetries(coordinator: any, runId: string, dungeonHash: string, attempts = 3) {
-  const url = `https://internal/result?runId=${encodeURIComponent(runId)}&dungeonHash=${encodeURIComponent(dungeonHash)}`;
-  for (let i = 0; i < attempts; i++) {
-    const res = await coordinator.fetch(url, { method: 'GET' });
-    if (res.status === 200) {
-      try {
-        return await res.json();
-      } catch (e) {
-        return null;
-      }
-    }
-    if (res.status === 408) {
-      // timeout waiting for batches; retry with backoff
-      const wait = 200 * Math.pow(2, i);
-      console.warn(`Coordinator returned 408, retrying in ${wait}ms (attempt ${i + 1}/${attempts})`);
-      await new Promise((r) => setTimeout(r, wait));
-      continue;
-    }
-    // other statuses: try to parse body and return
-    try {
-      return await res.json();
-    } catch (e) {
-      return null;
-    }
-  }
-  return null;
+  const elapsed = ((Date.now() - start) / 1000).toFixed(2);
+  console.log(`=== Completed member ${job.displayName} in ${elapsed}s ===\n`);
 }
 
 /**
- * HYBRID PROCESSING:
- * - Inline path (no DO) when workload is small (batches <= DO_THRESHOLD OR items <= ACTIVITY_THRESHOLD)
- * - DO path when workload is heavy (batches > DO_THRESHOLD AND items > ACTIVITY_THRESHOLD)
+ * Core per-dungeon processor with BatchCoordinator integration
+ * Uses SEQUENTIAL PGCR processing like dungeon-info-hub
  */
-export async function processMemberStats(env: Env, job: MemberJob): Promise<void> {
-  const BATCH_SIZE = getEnvNumber(env, 'BATCH_SIZE', 25);
-  const PREFETCH_BATCH_WINDOW = getEnvNumber(env, 'PREFETCH_BATCH_WINDOW', 2);
-  const MAX_PREFETCH_ITEMS_PER_WINDOW = getEnvNumber(env, 'MAX_PREFETCH_ITEMS_PER_WINDOW', 200);
-  const BUNGIE_FETCH_CONCURRENCY = getEnvNumber(env, 'BUNGIE_FETCH_CONCURRENCY', 6);
-  const BATCH_PROCESS_CONCURRENCY = getEnvNumber(env, 'BATCH_PROCESS_CONCURRENCY', 2);
-  const DUNGEON_PROCESS_CONCURRENCY = getEnvNumber(env, 'DUNGEON_PROCESS_CONCURRENCY', 2);
+async function processOneDungeon(env: Env, job: MemberJob, dungeonHash: string, activities: any[]) {
+  const dungeonName = ACTIVITY_REFERENCE_MAP.find(d => String(d.hash) === dungeonHash)?.displayName || dungeonHash;
 
-  // HYBRID knobs
-  const DO_THRESHOLD = getEnvNumber(env, 'DO_THRESHOLD', 1); // use DO when batches > DO_THRESHOLD
-  const ACTIVITY_THRESHOLD = getEnvNumber(env, 'ACTIVITY_THRESHOLD', 100); // or when items > this
+  // Read previous DB row
+  const prevRow = await env.DB.prepare(`
+    SELECT total_clears, total_full_clears, total_playtime_seconds, last_processed_date, last_processed_instance_id
+    FROM member_dungeon_stats
+    WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
+  `).bind(job.clanId, job.membershipId, dungeonHash).first();
 
-  const startTime = Date.now();
-  console.log(`Processing ${job.displayName} (${job.membershipId})`);
+  const prevClears = prevRow ? Number((prevRow as any).total_clears || 0) : 0;
+  const prevFullClears = prevRow ? Number((prevRow as any).total_full_clears || 0) : 0;
+  const prevPlaytime = prevRow ? Number((prevRow as any).total_playtime_seconds || 0) : 0;
+  const prevLastProcessed = prevRow ? (prevRow as any).last_processed_date : null;
+  const prevLastInstanceId = prevRow ? (prevRow as any).last_processed_instance_id ?? null : null;
 
-  // STEP 1: characters
-  const characters = await fetchCharactersForMember(job.membershipId, job.membershipType, env.BUNGIE_API_KEY);
-  if (!characters || characters.length === 0) {
-    console.log(`[${job.displayName}] No characters, skipping`);
+  let cutoffDate: Date | null = null;
+  let cutoffInstanceId: string | null = null;
+  if (prevLastProcessed) {
+    cutoffDate = new Date(prevLastProcessed);
+    cutoffInstanceId = prevLastInstanceId ? String(prevLastInstanceId) : null;
+  } else if (job.lastProcessedDate) {
+    cutoffDate = new Date(job.lastProcessedDate);
+    cutoffInstanceId = null;
+  }
+
+  console.log(`  ${dungeonName}: activities=${activities.length}, cutoffDate=${cutoffDate?.toISOString() || 'none'}, cutoffInstance=${cutoffInstanceId ?? 'none'}`);
+
+  // Trim to completed runs
+  const completed = activities.filter(a => isCompletedSearchContext(a));
+  console.log(`  ${dungeonName}: completed=${completed.length}`);
+  if (completed.length === 0) {
+    console.log(`  ${dungeonName}: no completed activities, skipping`);
     return;
   }
-  const characterIds = characters.map((c: any) => c.characterId);
 
-  // STEP 2: activities (dungeon + story)
-  const dungeonActivities = await fetchAllActivitiesForCharacters(job.membershipType, job.membershipId, characterIds, 82, env.BUNGIE_API_KEY, job.displayName);
-  const storyActivities = await fetchAllActivitiesForCharacters(job.membershipType, job.membershipId, characterIds, 2, env.BUNGIE_API_KEY, job.displayName);
+  // Normalize and validate
+  const normalized = completed.map(a => ({
+    instanceId: String(a.activityDetails?.instanceId || a.instanceId),
+    period: a.period || a.activityDetails?.period,
+    playtimeMeta: a.values?.timePlayedSeconds?.basic?.value ?? (a as any).seconds ?? 0,
+    characterId: a.characterId ?? null,
+    raw: a,
+  })).filter(x => x.instanceId && x.period);
 
-  // Merge + dedupe per character
-  const mergedByChar: Record<string, any[]> = {};
-  for (const charId of characterIds) {
-    mergedByChar[charId] = [...(dungeonActivities[charId] || []), ...(storyActivities[charId] || [])];
-    const map = new Map<string, any>();
-    mergedByChar[charId].forEach((a) => {
-      const id = a.activityDetails?.instanceId ?? a.instanceId;
-      if (!id) return;
-      const existing = map.get(id);
-      if (!existing) map.set(id, a);
-      else {
-        const exComp = existing?.values?.completed?.basic?.value === 1;
-        const newComp = a?.values?.completed?.basic?.value === 1;
-        if (!exComp && newComp) map.set(id, a);
-      }
-    });
-    mergedByChar[charId] = Array.from(map.values());
+  if (normalized.length === 0) {
+    console.log(`  ${dungeonName}: no valid normalized activities, skipping`);
+    return;
   }
 
-  // Group by dungeon
-  const activitiesByDungeon: Record<string, any[]> = {};
-  for (const d of ACTIVITY_REFERENCE_MAP) activitiesByDungeon[String(d.hash)] = [];
-  Object.values(mergedByChar).forEach((arr) => {
-    arr.forEach((activity) => {
-      const ref = extractActivityReferenceId(activity);
-      const instanceId = activity.activityDetails?.instanceId ?? activity.instanceId;
-      if (!ref || !instanceId) return;
-      for (const d of ACTIVITY_REFERENCE_MAP) {
-        if (d.referenceIds.includes(String(ref))) {
-          activitiesByDungeon[String(d.hash)].push(activity);
-          break;
-        }
-      }
-    });
+  // Sort deterministically
+  normalized.sort((a, b) => {
+    const ta = Date.parse(a.period);
+    const tb = Date.parse(b.period);
+    if (ta !== tb) return ta - tb;
+    if (a.instanceId < b.instanceId) return -1;
+    if (a.instanceId > b.instanceId) return 1;
+    return 0;
   });
 
-  // Process dungeons in parallel (bounded)
-  const dungeonEntries = Object.entries(activitiesByDungeon).filter(([, acts]) => (acts || []).length > 0);
+  // Apply resume cutoff
+  let startIndex = 0;
+  if (cutoffInstanceId) {
+    const idx = normalized.findIndex(n => n.instanceId === cutoffInstanceId);
+    if (idx >= 0) startIndex = idx + 1;
+    else if (cutoffDate) {
+      startIndex = normalized.findIndex(n => Date.parse(n.period) > cutoffDate.getTime());
+      if (startIndex === -1) startIndex = normalized.length;
+      console.warn(`  ${dungeonName}: cutoff instance not found, falling back to date cutoff (startIndex=${startIndex})`);
+    }
+  } else if (cutoffDate) {
+    startIndex = normalized.findIndex(n => Date.parse(n.period) > cutoffDate.getTime());
+    if (startIndex === -1) startIndex = normalized.length;
+  }
+
+  const items = normalized.slice(startIndex);
+  console.log(`  ${dungeonName}: new items to process=${items.length}`);
+  if (items.length === 0) return;
+
+  const latestItem = items[items.length - 1];
+  const lastProcessedDate = latestItem ? latestItem.period : prevLastProcessed;
+  const lastProcessedInstanceId = latestItem ? latestItem.instanceId : prevLastInstanceId;
+
+  const newClears = items.length;
+
+  // ===== PGCR VERIFICATION WITH BATCH COORDINATOR (SEQUENTIAL) =====
+  const runId = `member-${job.membershipId}-${dungeonHash}-${Date.now()}`;
+  const jobId = `member-${job.membershipId}`;
+  
+  const PGCR_BATCH_SIZE = getEnvNumber(env, 'PGCR_BATCH_SIZE', 50);
+  const batches: any[][] = [];
+  for (let i = 0; i < items.length; i += PGCR_BATCH_SIZE) {
+    batches.push(items.slice(i, i + PGCR_BATCH_SIZE));
+  }
+
+  console.log(`  ${dungeonName}: created ${batches.length} PGCR batches`);
+
+  // Initialize BatchCoordinator with retry
+  let coordinator: any;
+  try {
+    const coordinatorId = env.BATCH_COORDINATOR.idFromName(jobId);
+    coordinator = env.BATCH_COORDINATOR.get(coordinatorId);
+
+    await retryCoordinatorFetch(coordinator, '/init', {
+      method: 'POST',
+      body: JSON.stringify({
+        jobId,
+        runId,
+        dungeonHash,
+        totalBatches: batches.length,
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    }, 5);
+
+    console.log(`  ${dungeonName}: initialized BatchCoordinator with ${batches.length} batches`);
+  } catch (err) {
+    console.error(`  ${dungeonName}: failed to init BatchCoordinator`, err);
+    throw err;
+  }
+
+  // Process batches with configurable batch-level concurrency.
+  // PGCRs within each batch are still processed SEQUENTIALLY (to preserve ordering and reduce burst).
+  const PGCR_DELAY_MS = getEnvNumber(env, 'PGCR_DELAY_MS', 50);
+  const batchConcurrency = getEnvNumber(env, 'PGCR_BATCH_CONCURRENCY', 5);
+  console.log(`  ${dungeonName}: processing batches with concurrency=${batchConcurrency}, pgcrDelayMs=${PGCR_DELAY_MS}`);
+
+  const batchItems = batches.map((b, idx) => ({ batch: b, batchIdx: idx }));
 
   await promisePool(
-    dungeonEntries,
-    async ([dungeonHash, activities]) => {
-      // previous DB row (to compute delta)
-      const prevRow = await env.DB.prepare(`
-        SELECT total_full_clears, total_playtime_seconds, last_processed_date
-        FROM member_dungeon_stats
-        WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
-        LIMIT 1
-      `).bind(job.clanId, job.membershipId, dungeonHash).first();
+    batchItems,
+    async (bi) => {
+      const { batch, batchIdx } = bi;
+      const batchResults: any[] = [];
 
-      const prevFull = prevRow ? Number((prevRow as any).total_full_clears ?? 0) : null;
-      const prevPlay = prevRow ? Number((prevRow as any).total_playtime_seconds ?? 0) : null;
-      const prevLastProcessed = prevRow ? (prevRow as any).last_processed_date ?? null : null;
-
-      const globalCutoff = job.lastProcessedDate ?? null;
-      let cutoffTs: number | null = null;
-      const cutoffStr = prevLastProcessed ?? globalCutoff;
-      if (cutoffStr) {
-        const t = Date.parse(cutoffStr);
-        if (!Number.isNaN(t)) cutoffTs = t;
-      }
-
-      // Filter completed activities and cutoff
-      let completed = activities.filter((a) => a.values?.completed?.basic?.value === 1);
-      if (cutoffTs) {
-        completed = completed.filter((a) => {
-          const p = a.period ?? a.activityDetails?.period;
-          if (!p) return true;
-          const t = Date.parse(p);
-          return isNaN(t) ? true : t > cutoffTs!;
-        });
-      }
-
-      if (!completed || completed.length === 0) return null;
-
-      // Normalize and sort by playtime (small -> large)
-      const items = completed
-        .map((a) => ({
-          instanceId: String(a.activityDetails?.instanceId ?? a.instanceId),
-          period: a.period ?? a.activityDetails?.period,
-          playtime: a.values?.timePlayedSeconds?.basic?.value || 0,
-        }))
-        .filter(Boolean)
-        .sort((x, y) => (x.playtime || 0) - (y.playtime || 0));
-
-      // split into batches
-      const batches: any[][] = [];
-      for (let i = 0; i < items.length; i += BATCH_SIZE) batches.push(items.slice(i, i + BATCH_SIZE));
-
-      console.log(`[${job.displayName}] ${dungeonHash}: items=${items.length} batches=${batches.length}`);
-
-      // Decide path: INLINE or DO
-      const useDO = (batches.length > DO_THRESHOLD) && (items.length > ACTIVITY_THRESHOLD);
-
-      // Prefetch small window regardless (helps both paths)
-      let prefetchMap: Map<string, any | null> | undefined;
-      if (PREFETCH_BATCH_WINDOW > 0 && batches.length > 0) {
-        const windowIds: string[] = [];
-        for (let w = 0; w < Math.min(PREFETCH_BATCH_WINDOW, batches.length); w++) {
-          for (const it of batches[w]) {
-            if (windowIds.length >= MAX_PREFETCH_ITEMS_PER_WINDOW) break;
-            windowIds.push(it.instanceId);
-          }
-          if (windowIds.length >= MAX_PREFETCH_ITEMS_PER_WINDOW) break;
-        }
-        if (windowIds.length > 0) {
-          prefetchMap = new Map<string, any | null>();
-          await prefetchInstanceWindow(windowIds, env, prefetchMap, BUNGIE_FETCH_CONCURRENCY, MAX_PREFETCH_ITEMS_PER_WINDOW);
-          console.log(`[${job.displayName}] Prefetched ${prefetchMap.size}/${windowIds.length} PGCRs`);
-        }
-      }
-
-      const processOneBatch = async (batchItems: any[]) => {
-        if (prefetchMap) return processBatchUsingMap(batchItems, env, prefetchMap, BUNGIE_FETCH_CONCURRENCY);
-        return processBatchNetworkOnly(batchItems, env, BUNGIE_FETCH_CONCURRENCY);
-      };
-
-      if (!useDO) {
-        // INLINE MULTI-BATCH: process all batches locally (no DO) using bounded concurrency and aggregate locally
-        console.log(`[${job.displayName}] Using INLINE path for ${dungeonHash} (batches=${batches.length}, items=${items.length})`);
-        const perBatchResults = await promisePool(
-          batches,
-          async (batchItems) => {
-            return await processOneBatch(batchItems);
-          },
-          Math.max(1, Math.min(BATCH_PROCESS_CONCURRENCY, batches.length))
-        );
-
-        // Aggregate locally
-        let totalFull = 0, totalPlay = 0, lastActivityDate: string | null = null;
-        for (const r of perBatchResults) {
-          if (!r) continue;
-          totalFull += Number(r.fullClears || 0);
-          totalPlay += Number(r.playtimeSeconds || 0);
-          if (r.lastActivityDate && (!lastActivityDate || r.lastActivityDate > lastActivityDate)) lastActivityDate = r.lastActivityDate;
-        }
-
-        // Upsert and apply deltas
-        const newFull = totalFull;
-        const newPlay = totalPlay;
-        const wasNewRow = prevRow == null;
-
-        await upsertMemberDungeonStats(env.DB, {
-          clanId: job.clanId,
-          membershipId: job.membershipId,
-          membershipType: job.membershipType,
-          dungeonHash,
-          totalFullClears: newFull,
-          totalPlaytimeSeconds: newPlay,
-          lastProcessedDate: lastActivityDate ?? null,
-        });
-
-        const fullDelta = newFull - (prevFull ?? 0);
-        const playDelta = newPlay - (prevPlay ?? 0);
-        if (fullDelta !== 0 || playDelta !== 0 || wasNewRow) {
-          await applyClanAggregateDelta(env.DB, job.clanId, dungeonHash, fullDelta, playDelta, !!wasNewRow);
-        }
-
-        return null;
-      }
-
-      // DO path (heavy run) - use per-member DO coordinator
-      const doName = makeCoordinatorName(job.membershipId);
-      const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
-      const coordinatorId = env.BATCH_COORDINATOR.idFromName(doName);
-      const coordinator = env.BATCH_COORDINATOR.get(coordinatorId);
-      console.log(`[${job.displayName}] Using DO path for ${dungeonHash}. DO=${doName} id=${(coordinatorId as any).toString?.() || String(coordinatorId)}`);
-
-      // init run/dungeon
-      await coordinator.fetch('https://internal/init', {
-        method: 'POST',
-        body: JSON.stringify({ jobId: doName, runId, dungeonHash, totalBatches: batches.length }),
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      // post batches (each includes runId + dungeonHash)
-      await promisePool(
-        batches,
-        async (batchItems, index) => {
-          const result = await processOneBatch(batchItems);
-          try {
-            await coordinator.fetch('https://internal/batch', {
-              method: 'POST',
-              body: JSON.stringify({
-                runId,
-                dungeonHash,
-                batchIndex: index,
-                fullClears: result.fullClears,
-                playtimeSeconds: result.playtimeSeconds,
-                lastActivityDate: result.lastActivityDate,
-              }),
-              headers: { 'Content-Type': 'application/json' },
+      // Process each PGCR in this batch SEQUENTIALLY with delay
+      for (const item of batch) {
+        try {
+          const pgcr = await fetchPGCR(item.instanceId, env.BUNGIE_API_KEY);
+          
+          if (!pgcr) {
+            batchResults.push({
+              instanceId: item.instanceId,
+              period: item.period,
+              playtimeFromPgcr: null,
+              playtimeFallback: item.playtimeMeta || 0,
+              isFullClear: false,
+              verified: false,
             });
-          } catch (err) {
-            console.error(`[${job.displayName}] Failed to post batch to coordinator`, err);
+          } else {
+            const isFull = determineClearType(pgcr, item.period);
+            let pTime: number | null = null;
+            
+            try {
+              const entries = pgcr.entries || [];
+              const match = entries.find((e: any) => {
+                const pid = e?.player?.destinyUserInfo?.membershipId;
+                const cid = e?.player?.destinyUserInfo?.characterId;
+                return (pid && String(pid) === String(job.membershipId)) || 
+                       (cid && String(cid) === String(item.characterId));
+              });
+              if (match) pTime = Number(match?.values?.timePlayedSeconds?.basic?.value ?? null);
+            } catch {
+              pTime = null;
+            }
+
+            batchResults.push({
+              instanceId: item.instanceId,
+              period: item.period,
+              playtimeFromPgcr: pTime,
+              playtimeFallback: item.playtimeMeta || 0,
+              isFullClear: !!isFull,
+              verified: true,
+            });
           }
-          return null;
-        },
-        Math.max(1, Math.min(BATCH_PROCESS_CONCURRENCY, batches.length))
-      );
+        } catch (err) {
+          console.warn(`  ${dungeonName}: PGCR fetch failed for ${item.instanceId}:`, err);
+          batchResults.push({
+            instanceId: item.instanceId,
+            period: item.period,
+            playtimeFromPgcr: null,
+            playtimeFallback: item.playtimeMeta || 0,
+            isFullClear: false,
+            verified: false,
+          });
+        }
 
-      // request aggregated result for this dungeon/run with retries
-      const aggregated = await fetchCoordinatorResultWithRetries(coordinator, runId, dungeonHash);
-      const newFull = Number(aggregated?.fullClears ?? 0);
-      const newPlay = Number(aggregated?.playtimeSeconds ?? 0);
-      const wasNewRow = prevRow == null;
+        // Small delay between PGCR requests to avoid rate limits
+        if (PGCR_DELAY_MS > 0) {
+          await sleep(PGCR_DELAY_MS);
+        }
+      }
 
-      await upsertMemberDungeonStats(env.DB, {
-        clanId: job.clanId,
-        membershipId: job.membershipId,
-        membershipType: job.membershipType,
-        dungeonHash,
-        totalFullClears: newFull,
-        totalPlaytimeSeconds: newPlay,
-        lastProcessedDate: aggregated?.lastActivityDate ?? null,
-      });
+      // Aggregate batch results
+      let fullClears = 0;
+      let playtimeSeconds = 0;
+      let lastActivityDate: string | null = null;
 
-      const fullDelta = newFull - (prevFull ?? 0);
-      const playDelta = newPlay - (prevPlay ?? 0);
-      if (fullDelta !== 0 || playDelta !== 0 || wasNewRow) {
-        await applyClanAggregateDelta(env.DB, job.clanId, dungeonHash, fullDelta, playDelta, !!wasNewRow);
+      for (const r of batchResults) {
+        if (r.playtimeFromPgcr !== null && Number.isFinite(r.playtimeFromPgcr)) {
+          playtimeSeconds += Number(r.playtimeFromPgcr);
+        } else {
+          playtimeSeconds += Number(r.playtimeFallback || 0);
+        }
+        if (r.verified && r.isFullClear) fullClears++;
+        if (!lastActivityDate || r.period > lastActivityDate) {
+          lastActivityDate = r.period;
+        }
+      }
+
+      // Report to BatchCoordinator with retry
+      try {
+        await retryCoordinatorFetch(coordinator, '/batch', {
+          method: 'POST',
+          body: JSON.stringify({
+            runId,
+            dungeonHash,
+            batchIndex: batchIdx,
+            fullClears,
+            playtimeSeconds,
+            lastActivityDate,
+          }),
+          headers: { 'Content-Type': 'application/json' },
+        }, 5);
+        console.log(`  ${dungeonName}: reported batch ${batchIdx + 1}/${batches.length} to coordinator`);
+      } catch (err) {
+        console.warn(`  ${dungeonName}: failed to report batch ${batchIdx} to coordinator after retries`, err);
       }
 
       return null;
     },
-    DUNGEON_PROCESS_CONCURRENCY
+    Math.max(1, Math.min(batchConcurrency, batchItems.length))
   );
 
-  const duration = ((Date.now() - startTime) / 1000).toFixed(2);
-  console.log(`Completed ${job.displayName} in ${duration}s`);
-  return;
+  // Get aggregated results from BatchCoordinator
+  let aggregated: any;
+  try {
+    aggregated = await pollCoordinatorResult(coordinator, runId, dungeonHash, batches.length);
+  } catch (err) {
+    console.error(`  ${dungeonName}: failed to get BatchCoordinator results after retries`, err);
+    throw err;
+  }
+
+  const newFullClears = Number(aggregated.fullClears || 0);
+  const newPlaytime = Number(aggregated.playtimeSeconds || 0);
+
+  console.log(`  ${dungeonName}: aggregated results - fullClears=${newFullClears}, playtime=${newPlaytime}s`);
+
+  // Persist totals
+  const totalClears = prevClears + newClears;
+  const totalFullClears = prevFullClears + newFullClears;
+  const totalPlaytime = prevPlaytime + newPlaytime;
+
+  await upsertMemberDungeonStats(env.DB, {
+    clanId: job.clanId,
+    membershipId: job.membershipId,
+    membershipType: job.membershipType,
+    dungeonHash,
+    totalClears,
+    totalFullClears,
+    totalPlaytimeSeconds: totalPlaytime,
+    lastProcessedDate,
+    lastProcessedInstanceId,
+  });
+
+  console.log(`  ${dungeonName}: DB updated - total_clears=${totalClears} (+${newClears}), total_full_clears=${totalFullClears} (+${newFullClears}), playtime=${totalPlaytime}s`);
+
+  await applyClanAggregateDelta(env.DB, job.clanId, dungeonHash, newClears, newFullClears, newPlaytime, !prevRow);
 }
 
-/** fetchAllActivitiesForCharacters unchanged - included for completeness */
+/**
+ * Fetch activities for all characters with pagination (mode-specific)
+ */
 async function fetchAllActivitiesForCharacters(
   membershipType: number,
   membershipId: string,
   characterIds: string[],
   mode: number,
-  apiKey: string,
-  displayName: string
-): Promise<Record<string, any[]>> {
-  const allActivities: Record<string, any[]> = {};
-  characterIds.forEach((id) => (allActivities[id] = []));
-  let activeCharacters = [...characterIds];
+  apiKey: string
+) {
+  const out: Record<string, any[]> = {};
+  for (const id of characterIds) out[id] = [];
+
+  let active = [...characterIds];
   let page = 0;
   const pageSize = 250;
-  while (activeCharacters.length > 0) {
-    const results = await Promise.allSettled(
-      activeCharacters.map((characterId) =>
-        fetchActivitiesForCharacter(membershipType, membershipId, characterId, page, mode, pageSize, apiKey)
-      )
+  const maxPages = 100;
+
+  while (active.length > 0 && page < maxPages) {
+    const promises = active.map(charId =>
+      fetchActivitiesForCharacter(membershipType, membershipId, charId, page, mode, pageSize, apiKey)
+        .catch(err => {
+          console.warn(`fetch activities failed for ${charId} page ${page}:`, err?.message || err);
+          return [];
+        })
     );
-    const newActive: string[] = [];
-    for (let i = 0; i < results.length; i++) {
-      const characterId = activeCharacters[i];
-      const result = results[i];
-      if (result.status === 'fulfilled' && result.value.length > 0) {
-        allActivities[characterId].push(...result.value);
-        if (result.value.length === pageSize) newActive.push(characterId);
+    
+    const results = await Promise.all(promises);
+    const nextActive: string[] = [];
+    
+    for (let i = 0; i < active.length; i++) {
+      const charId = active[i];
+      const activities = results[i] || [];
+      if (activities.length > 0) {
+        const withChar = activities.map((a: any) => ({ ...a, characterId: charId }));
+        out[charId].push(...withChar);
+        if (activities.length === pageSize) nextActive.push(charId);
       }
     }
-    activeCharacters = newActive;
+    
+    active = nextActive;
     page++;
-    if (page > 100) {
-      console.log(`[${displayName}] Hit page limit (100)`);
-      break;
-    }
   }
-  return allActivities;
+
+  // Per-character dedupe by instanceId (prefer completed)
+  for (const id of Object.keys(out)) {
+    const map = new Map<string, any>();
+    for (const a of out[id]) {
+      const inst = a.activityDetails?.instanceId || a.instanceId;
+      if (!inst) continue;
+      const ex = map.get(inst);
+      if (!ex) map.set(inst, a);
+      else {
+        const exC = !!(ex?.values?.completed?.basic?.value === 1);
+        const newC = !!(a?.values?.completed?.basic?.value === 1);
+        if (!exC && newC) map.set(inst, a);
+      }
+    }
+    out[id] = Array.from(map.values());
+  }
+
+  return out;
 }
 
-function extractActivityReferenceId(activity: any): string | null {
-  if (!activity) return null;
-  const ref = activity?.activityDetails?.referenceId ?? activity?.activityHash ?? activity?.referenceId ?? null;
-  return ref != null ? String(ref) : null;
+/**
+ * Fetch all activities for all characters (combines dungeon mode 82 and story mode 2)
+ */
+async function fetchAllActivitiesForAllChars(
+  membershipType: number,
+  membershipId: string,
+  characterIds: string[],
+  apiKey: string
+) {
+  const [dungeon, story] = await Promise.all([
+    fetchAllActivitiesForCharacters(membershipType, membershipId, characterIds, 82, apiKey),
+    fetchAllActivitiesForCharacters(membershipType, membershipId, characterIds, 2, apiKey),
+  ]);
+
+  const out: Record<string, any[]> = {};
+  for (const id of characterIds) {
+    out[id] = [...(dungeon[id] || []), ...(story[id] || [])];
+    
+    // Final dedupe after merging modes
+    const map = new Map<string, any>();
+    for (const a of out[id]) {
+      const inst = a.activityDetails?.instanceId || a.instanceId;
+      if (!inst) continue;
+      if (!map.has(inst)) map.set(inst, a);
+      else {
+        const existing = map.get(inst);
+        const exC = !!(existing?.values?.completed?.basic?.value === 1);
+        const newC = !!(a?.values?.completed?.basic?.value === 1);
+        if (!exC && newC) map.set(inst, a);
+      }
+    }
+    out[id] = Array.from(map.values());
+  }
+
+  return out;
+}
+
+/**
+ * Helper to retry coordinator.fetch calls with exponential backoff
+ */
+async function retryCoordinatorFetch(coordinator: any, path: string, opts: any, maxAttempts = 5) {
+  let attempt = 0;
+  let lastErr: any = null;
+  while (attempt < maxAttempts) {
+    try {
+      const url = `https://internal${path}`;
+      const res = await coordinator.fetch(url, opts);
+      if (res.ok) {
+        return res;
+      }
+      if (res.status >= 400 && res.status < 500 && res.status !== 408) {
+        const body = await safeJson(res);
+        throw new Error(`Coordinator ${path} failed: ${res.status} ${JSON.stringify(body)}`);
+      }
+      lastErr = new Error(`Coordinator ${path} returned status ${res.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    attempt++;
+    const backoff = Math.min(1000 * Math.pow(2, attempt), 10000);
+    console.log(`  coordinator ${path} retrying in ${backoff}ms (attempt ${attempt}/${maxAttempts})`);
+    await sleep(backoff);
+  }
+  throw lastErr || new Error('Coordinator request failed');
+}
+
+async function safeJson(res: Response) {
+  try {
+    return await res.json();
+  } catch {
+    try {
+      return await res.text();
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Poll the coordinator for aggregated results
+ */
+async function pollCoordinatorResult(coordinator: any, runId: string, dungeonHash: string, totalBatches: number) {
+  const minWait = 30_000;
+  const waitPerBatch = 1000;
+  const maxWait = Math.max(minWait, totalBatches * waitPerBatch, 30_000);
+  const start = Date.now();
+  let attempt = 0;
+  let pollInterval = 200;
+
+  while (Date.now() - start < maxWait) {
+    attempt++;
+    try {
+      const res = await coordinator.fetch(`https://internal/result?runId=${encodeURIComponent(runId)}&dungeonHash=${encodeURIComponent(dungeonHash)}`, { method: 'GET' });
+      if (res.ok) {
+        const json = await res.json();
+        return json;
+      } else if (res.status === 408) {
+        const elapsed = Date.now() - start;
+        console.log(`  pollCoordinatorResult: timeout from coordinator, elapsed=${elapsed}ms, will retry (attempt ${attempt})`);
+        await sleep(pollInterval);
+        pollInterval = Math.min(1000, Math.floor(pollInterval * 1.5));
+        continue;
+      } else {
+        const body = await safeJson(res);
+        console.warn(`  pollCoordinatorResult: coordinator returned status ${res.status}: ${JSON.stringify(body)}`);
+        await sleep(Math.min(1000 * attempt, 5000));
+        continue;
+      }
+    } catch (err) {
+      console.warn('  pollCoordinatorResult: fetch error, retrying', err);
+      await sleep(Math.min(1000 * attempt, 5000));
+    }
+  }
+
+  // Final attempt
+  try {
+    console.warn(`  pollCoordinatorResult: maxWait exceeded (${maxWait}ms), doing final fetch`);
+    const final = await coordinator.fetch(`https://internal/result?runId=${encodeURIComponent(runId)}&dungeonHash=${encodeURIComponent(dungeonHash)}`, { method: 'GET' });
+    if (final.ok) return await final.json();
+    const body = await safeJson(final);
+    throw new Error(`Final coordinator fetch failed: ${final.status} ${JSON.stringify(body)}`);
+  } catch (err) {
+    throw new Error(`pollCoordinatorResult failed after ${Date.now() - start}ms: ${err}`);
+  }
 }
