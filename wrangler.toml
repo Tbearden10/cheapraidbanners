@@ -62,6 +62,10 @@ name = "RUN_TRACKER"
 class_name = "RunTracker"
 # Used for: Tracking stats sync completion and triggering aggregate recompute
 
+# ===== DURABLE OBJECT MIGRATIONS =====
+# Register DO classes with a migration so Cloudflare will create the classes.
+# If you already have a migrations section, add a new [[migrations]] entry
+# with an incremented tag (e.g. "v2") instead of reusing the same tag.
 [[migrations]]
 tag = "v1"
 new_classes = ["BatchCoordinator", "RunTracker"]
