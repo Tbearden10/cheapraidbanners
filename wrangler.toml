@@ -25,7 +25,7 @@ DUNGEON_PROCESSING_CONCURRENCY = "1"        # Process 5 dungeons in parallel per
 
 # PGCR verification (SEQUENTIAL like dungeon-info-hub)
 PGCR_BATCH_SIZE = "30"                      # Items per batch to BatchCoordinator
-PGCR_DELAY_MS = "5"                        # Delay between sequential PGCR requests (milliseconds)
+PGCR_DELAY_MS = "50"                        # Delay between sequential PGCR requests (milliseconds)
 PGCR_BATCH_CONCURRENCY = "2"
 
 # ===== BUNGIE API SETTINGS =====
@@ -87,13 +87,13 @@ zone_name = "cheapraidbanners.com"
 [env.dev]
 [env.dev.vars]
 ENVIRONMENT = "dev"
-ENRICH_CONCURRENCY = "2"
-QUEUE_SEND_CONCURRENCY = "2"
+ENRICH_CONCURRENCY = "1"
+QUEUE_SEND_CONCURRENCY = "1"
 QUEUE_PROCESS_CONCURRENCY = "1"
-DUNGEON_PROCESSING_CONCURRENCY = "5"
-PGCR_BATCH_SIZE = "50"
+DUNGEON_PROCESSING_CONCURRENCY = "1"
+PGCR_BATCH_SIZE = "30"
 PGCR_DELAY_MS = "50"
-PGCR_BATCH_CONCURRENCY = "5"
+PGCR_BATCH_CONCURRENCY = "1"
 BUNGIE_PER_REQUEST_TIMEOUT_MS = "15000"
 BUNGIE_FETCH_RETRIES = "3"
 
@@ -109,7 +109,7 @@ queue = "member-stats-queue-local"
 [[env.dev.queues.consumers]]
 queue = "member-stats-queue-local"
 max_batch_size = 1
-max_batch_timeout = 5
+max_batch_timeout = 50
 max_retries = 3
 dead_letter_queue = "member-stats-dlq-local"
 

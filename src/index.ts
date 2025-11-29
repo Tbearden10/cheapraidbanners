@@ -127,7 +127,7 @@ export async function memberSyncCron(env: Env) {
   const leftMembers = dbMembers.filter((m) => !rosterMemberIds.has(m.membership_id));
 
   // Enrich roster with emblem data
-  const ENRICH_CONC = Number((env as any).ENRICH_CONCURRENCY) || 4;
+  const ENRICH_CONC = Number((env as any).ENRICH_CONCURRENCY) || 1;
   const enriched: any[] = [];
   
   await promisePool(
@@ -349,7 +349,7 @@ export async function statsSyncCron(env: Env) {
     console.warn('[StatsSync] Failed to init RunTracker', err);
   }
 
-  const sendConcurrency = Number((env as any).QUEUE_SEND_CONCURRENCY) || 4;
+  const sendConcurrency = Number((env as any).QUEUE_SEND_CONCURRENCY) || 1;
   let queued = 0;
 
   await promisePool(
@@ -747,7 +747,7 @@ export default {
   async queue(batch: any, env: Env) {
     console.log(`\n[Queue] Received batch with ${batch.messages.length} message(s)`);
 
-    const queueConcurrency = Number((env as any).QUEUE_PROCESS_CONCURRENCY) || 2;
+    const queueConcurrency = Number((env as any).QUEUE_PROCESS_CONCURRENCY) || 1;
 
     // PRELOAD the memberStatsProcessor module once so the dynamic import doesn't
     // serialize per-worker execution. This ensures workers can start work

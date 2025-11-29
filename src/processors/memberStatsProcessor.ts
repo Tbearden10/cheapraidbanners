@@ -117,7 +117,7 @@ export async function processMemberStats(env: Env, job: MemberJob): Promise<void
   const dungeonHashes = Object.keys(activitiesByDungeon).filter(h => activitiesByDungeon[h].length > 0);
   console.log(`Processing ${dungeonHashes.length} dungeon(s) in parallel`);
 
-  const dungeonConcurrency = getEnvNumber(env, 'DUNGEON_PROCESSING_CONCURRENCY', 5);
+  const dungeonConcurrency = getEnvNumber(env, 'DUNGEON_PROCESSING_CONCURRENCY', 1);
   
   await promisePool(
     dungeonHashes,
@@ -225,7 +225,7 @@ async function processOneDungeon(env: Env, job: MemberJob, dungeonHash: string, 
   const runId = `member-${job.membershipId}-${dungeonHash}-${Date.now()}`;
   const jobId = `member-${job.membershipId}`;
   
-  const PGCR_BATCH_SIZE = getEnvNumber(env, 'PGCR_BATCH_SIZE', 50);
+  const PGCR_BATCH_SIZE = getEnvNumber(env, 'PGCR_BATCH_SIZE', 30);
   const batches: any[][] = [];
   for (let i = 0; i < items.length; i += PGCR_BATCH_SIZE) {
     batches.push(items.slice(i, i + PGCR_BATCH_SIZE));
@@ -259,7 +259,7 @@ async function processOneDungeon(env: Env, job: MemberJob, dungeonHash: string, 
   // Process batches with configurable batch-level concurrency.
   // PGCRs within each batch are still processed SEQUENTIALLY (to preserve ordering and reduce burst).
   const PGCR_DELAY_MS = getEnvNumber(env, 'PGCR_DELAY_MS', 50);
-  const batchConcurrency = getEnvNumber(env, 'PGCR_BATCH_CONCURRENCY', 5);
+  const batchConcurrency = getEnvNumber(env, 'PGCR_BATCH_CONCURRENCY', 1);
   console.log(`  ${dungeonName}: processing batches with concurrency=${batchConcurrency}, pgcrDelayMs=${PGCR_DELAY_MS}`);
 
   const batchItems = batches.map((b, idx) => ({ batch: b, batchIdx: idx }));
