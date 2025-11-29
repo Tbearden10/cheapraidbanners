@@ -822,7 +822,7 @@ export default {
         await statsSyncCron(env);
       } 
       // Then check member sync
-      else if (cronString.includes('*/30')) {
+      else if (cronString.includes('*/10')) {
         console.log('[Cron] Running member sync (every 30 min)');
         await memberSyncCron(env);
       }
