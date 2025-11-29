@@ -75,7 +75,7 @@ new_classes = ["BatchCoordinator", "RunTracker"]
 [triggers]
 crons = [
   "*/30 * * * *",    # Member sync: every 30 minutes
-  "0 */6 * * *"      # Stats sync: every 6 hours (at 00:00, 06:00, 12:00, 18:00 UTC)
+  "0 */1 * * *"      # Stats sync: every 6 hours (at 00:00, 06:00, 12:00, 18:00 UTC)
 ]
 
 # ===== ROUTES =====
