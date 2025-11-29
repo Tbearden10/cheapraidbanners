@@ -817,7 +817,7 @@ export default {
       const cronString = event.cron || '';
       
       // More specific pattern matching - check stats sync first (more specific)
-      if (cronString.includes('*/10')) {
+      if (cronString.includes('0 */1')) {
         console.log('[Cron] Running stats sync (every 6 hours)');
         await statsSyncCron(env);
       } 
@@ -833,7 +833,7 @@ export default {
         const hours = now.getHours();
         
         // Stats sync runs at minute 0 every 6 hours
-        if (minutes === 0 && hours % 6 === 0) {
+        if (minutes === 0 && hours % 24 === 0) {
           console.log('[Cron] Running stats sync (fallback time-based detection)');
           await statsSyncCron(env);
         } else {
