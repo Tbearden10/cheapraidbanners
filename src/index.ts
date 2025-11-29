@@ -817,12 +817,12 @@ export default {
       const cronString = event.cron || '';
       
       // More specific pattern matching - check stats sync first (more specific)
-      if (cronString.includes('0 */6')) {
+      if (cronString.includes('*/10')) {
         console.log('[Cron] Running stats sync (every 6 hours)');
         await statsSyncCron(env);
       } 
       // Then check member sync
-      else if (cronString.includes('*/10')) {
+      else if (cronString.includes('*/30')) {
         console.log('[Cron] Running member sync (every 30 min)');
         await memberSyncCron(env);
       }
