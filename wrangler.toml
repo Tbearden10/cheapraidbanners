@@ -33,6 +33,11 @@ BUNGIE_PER_REQUEST_TIMEOUT_MS = "15000"     # 15s timeout per request
 BUNGIE_FETCH_RETRIES = "3"                  # Retry attempts on failure
 BUNGIE_FETCH_BACKOFF_MS = "400"             # Base backoff delay (exponential)
 
+# ===== WORKER SELF-INVOCATION =====
+# URL for internal queue dispatch. The queue handler uses this to dispatch
+# each batch message to a new worker invocation via fetch.
+WORKER_URL = "https://api.cheapraidbanners.com"
+
 # ===== D1 DATABASE =====
 [[d1_databases]]
 binding = "DB"
@@ -111,6 +116,8 @@ PGCR_DELAY_MS = "50"
 PGCR_BATCH_CONCURRENCY = "1"
 BUNGIE_PER_REQUEST_TIMEOUT_MS = "15000"
 BUNGIE_FETCH_RETRIES = "3"
+# Dev uses localhost for self-invocation
+WORKER_URL = "http://localhost:8787"
 
 [[env.dev.d1_databases]]
 binding = "DB"

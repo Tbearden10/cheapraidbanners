@@ -2,7 +2,7 @@
 export { BatchCoordinator } from './durable-objects/BatchCoordinator';
 export { RunTracker } from './durable-objects/RunTracker';
 
-import type { Env, MemberJob, ExecutionContext } from './types';
+import type { Env, MemberJob, ExecutionContext, QueueBatch, QueueMessage } from './types';
 import { fetchClanRoster, enrichMemberWithEmblem, fetchCharactersForMember, fetchActivitiesForCharacter, fetchPGCR, fetchActivityDefinition } from './api/bungieApi';
 import {
   getMembersList,
@@ -798,22 +798,23 @@ export default {
    * - Each invocation handles one member's stats processing independently
    * - Better resource isolation and fault tolerance per member
    */
-  async queue(batch: any, env: Env, ctx: ExecutionContext) {
+  async queue(batch: QueueBatch<MemberJob>, env: Env, ctx: ExecutionContext) {
     console.log(`\n[Queue] Received batch with ${batch.messages.length} message(s)`);
     console.log(`[Queue] Dispatching each message to a new worker invocation`);
 
-    const queueConcurrency = Number((env as any).QUEUE_PROCESS_CONCURRENCY) || 1;
+    const queueConcurrency = Number(env.QUEUE_PROCESS_CONCURRENCY) || 1;
 
     // Determine the worker URL for self-invocation
-    // In production, use the configured route; in dev, use localhost
-    const workerUrl = env.ENVIRONMENT === 'dev' || env.ENVIRONMENT === 'development'
-      ? 'http://localhost:8787'
-      : 'https://api.cheapraidbanners.com';
+    // Use WORKER_URL env var if set, otherwise fall back to defaults
+    const workerUrl = env.WORKER_URL 
+      || (env.ENVIRONMENT === 'dev' || env.ENVIRONMENT === 'development'
+          ? 'http://localhost:8787'
+          : 'https://api.cheapraidbanners.com');
 
     await promisePool(
       batch.messages,
-      async (message: any) => {
-        const job = message.body as any;
+      async (message: QueueMessage<MemberJob>) => {
+        const job = message.body;
         console.log(`[Queue] Dispatching member: ${job.displayName} (${job.membershipId}) at ${new Date().toISOString()}`);
 
         try {

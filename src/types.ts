@@ -74,6 +74,9 @@ export interface Env {
   BUNGIE_API_KEY: string;
   BUNGIE_CLAN_ID: string;
   API_TOKEN: string;
+  ENVIRONMENT?: string;
+  QUEUE_PROCESS_CONCURRENCY?: string;
+  WORKER_URL?: string;
   [key: string]: any;
 }
 
