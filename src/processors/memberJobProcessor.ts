@@ -1,9 +1,10 @@
 // ============================================================================
 // FILE: src/processors/memberJobProcessor.ts
-// Processes a single member - fetches activities and queues per-dungeon jobs
-// NOW WITH: Activity splitting to avoid 15-minute timeout
-// Minimal change: keep original flow but use stronger filtering and smaller
-// in-memory objects when fetching pages to avoid OOM. No page caps.
+// SIMPLIFIED: Processes a single member completely within one worker invocation
+// - Fetches characters and activities
+// - Fetches PGCRs for new activities  
+// - Writes stats directly to DB
+// - No intermediate queuing or Durable Object coordination
 // ============================================================================
 
 import type { Env, MemberJob } from '../types';
@@ -11,10 +12,33 @@ import { ACTIVITY_REFERENCE_MAP } from '../constants/activityReferenceMap';
 import {
   fetchCharactersForMember,
   fetchActivitiesForCharacter,
+  fetchPGCR,
   withRateLimit,
 } from '../api/bungieApi';
+import { upsertMemberDungeonStats } from '../db/queries';
+import { applyClanAggregateDelta } from '../db/aggregateHelpers';
+import { trackRunProgress } from '../kv/runTracker';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// Constants for PGCR full clear determination
+const BEYOND_LIGHT_START_MS = Date.parse('2020-11-10T17:00:00.000Z');
+const WITCH_QUEEN_START_MS = Date.parse('2022-02-22T17:00:00.000Z');
+const HAUNTED_START_MS = Date.parse('2022-05-24T17:00:00.000Z');
+
+function determineClearType(pgcr: any, period: string): boolean {
+  const timestamp = Date.parse(period);
+  if (timestamp >= HAUNTED_START_MS) {
+    return Boolean(pgcr.activityWasStartedFromBeginning);
+  }
+  if (timestamp < BEYOND_LIGHT_START_MS) {
+    return pgcr.startingPhaseIndex === 0;
+  }
+  if (timestamp >= WITCH_QUEEN_START_MS) {
+    return Boolean(pgcr.activityWasStartedFromBeginning);
+  }
+  return true;
+}
 
 export async function processMemberJob(env: Env, job: MemberJob): Promise<void> {
   const startTime = Date.now();
@@ -32,6 +56,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
   if (!characters || characters.length === 0) {
     console.log(`[MemberJob] No characters for ${job.displayName} - skipping`);
+    if (job.runId) {
+      await trackRunProgress(env.RUN_TRACKING_KV, job.runId, { processed: 1 }).catch(() => {});
+    }
     return;
   }
 
@@ -48,8 +75,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     console.error(`[MemberJob] ❌ Failed to fetch activities for ${job.displayName}:`, err);
     return characterIds.reduce((acc: Record<string, any[]>, id) => { acc[id] = []; return acc; }, {});
   });
-
-  const totalActivitiesFetched = Object.values(activitiesByChar).reduce((sum, acts) => sum + acts.length, 0);
 
   // 3. Group by dungeon
   const activitiesByDungeon: Record<string, any[]> = {};
@@ -92,20 +117,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     activitiesByDungeon[hash] = Array.from(map.values());
   }
 
-  // 4. Queue per-dungeon jobs WITH SPLITTING LOGIC
-  let totalQueued = 0;
-  let totalBatches = 0;
-
-  // Configuration for splitting large jobs
-  const PGCR_BATCH_SIZE = 25;              // Activities per PGCR fetch batch
-  const BATCH_PROCESSING_TIME = 10;        // Seconds per batch (measured)
-  const MAX_QUEUE_JOB_DURATION = 8 * 60;   // 8 minutes (safe margin under 15 min)
-  
-  // Calculate max activities per STATS_QUEUE job
-  const MAX_ACTIVITIES_PER_JOB = Math.floor(
-    (MAX_QUEUE_JOB_DURATION / BATCH_PROCESSING_TIME) * PGCR_BATCH_SIZE
-  );
-  // Result: (8*60 / 10) * 25 = 48 * 25 = 1,200 activities per job
+  // 4. Process each dungeon's activities DIRECTLY (no intermediate queue)
+  let totalProcessed = 0;
+  let totalWritten = 0;
 
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
     const dungeonHash = dungeon.hash;
@@ -120,9 +134,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     const completed = activities.filter(a => a?.values?.completed === true);
     if (completed.length === 0) continue;
 
-    // Check DB for previous stats and last_processed_date (resume logic)
+    // Check DB for previous stats
     const prevRow = await env.DB.prepare(`
-      SELECT last_processed_date, total_clears, total_full_clears
+      SELECT last_processed_date, total_clears, total_full_clears, total_playtime_seconds
       FROM member_dungeon_stats
       WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
     `).bind(job.clanId, job.membershipId, dungeonHash).first();
@@ -135,21 +149,20 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     }
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? (prevRow as any).total_full_clears ?? 0) : 0;
-    const totalCompletionsFromBungie = completed.length;
 
-    // Quick skip based on counts
-    if (totalCompletionsFromBungie <= dbTotalClears) {
+    // Quick skip if no new activities
+    if (completed.length <= dbTotalClears) {
       continue;
     }
 
-    // Sort completed activities by period ascending (oldest first)
+    // Sort by period ascending (oldest first)
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
       const tb = b.period ? new Date(b.period).getTime() : 0;
       return ta - tb;
     });
 
-    // Filter to new activities using cutoffDate (strict >)
+    // Filter to new activities using cutoffDate
     let newActivities = completed;
     if (cutoffDate) {
       newActivities = completed.filter(a => {
@@ -166,106 +179,135 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       continue;
     }
 
-    console.log(`[MemberJob] ${dungeonName}: ${newActivities.length} new activities to process`);
-
-    // Prepare activities for queue
-    const activitiesPayload = newActivities.map(a => ({
-      instanceId: a.activityDetails?.instanceId || a.instanceId,
-      seconds: a.values?.activityDurationSeconds || 0,
-      date: a.period,
-      characterId: (a as any).characterId,
-    }));
-
-    const jobId = `member-${job.membershipId}-${dungeonHash}`;
+    console.log(`[MemberJob] ${dungeonName}: Processing ${newActivities.length} new activities`);
 
     // ========================================================================
-    // KEY CHANGE: Split large activity sets into multiple jobs
+    // DIRECT PROCESSING: Fetch PGCRs and calculate stats inline
     // ========================================================================
+    const PGCR_BATCH_SIZE = 10;
+    const DELAY_MS = 300;
 
-    if (activitiesPayload.length <= MAX_ACTIVITIES_PER_JOB) {
-      // CASE 1: Small enough to process in one job
-      const batches: any[][] = [];
-      for (let i = 0; i < activitiesPayload.length; i += PGCR_BATCH_SIZE) {
-        batches.push(activitiesPayload.slice(i, i + PGCR_BATCH_SIZE));
-      }
+    let fullClearsFound = 0;
+    let totalPlaytime = 0;
+    let latestActivityDate: string | null = null;
+    let pgcrSuccessCount = 0;
 
-      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-        try {
-          await env.STATS_QUEUE.send({
-            clanId: job.clanId,
-            membershipId: job.membershipId,
-            membershipType: job.membershipType,
-            dungeonHash,
-            activities: batches[batchIndex],
-            jobId,
-            batchIndex,
-            totalBatches: batches.length,
-          });
-          totalQueued += batches[batchIndex].length;
-          totalBatches++;
-        } catch (err) {
-          console.error(`[MemberJob] ❌ Failed to queue batch for ${job.displayName}/${dungeonName}:`, err);
-        }
-      }
+    for (let i = 0; i < newActivities.length; i += PGCR_BATCH_SIZE) {
+      const batch = newActivities.slice(i, i + PGCR_BATCH_SIZE);
 
-    } else {
-      // CASE 2: Too large - split into multiple independent jobs
-      const numJobs = Math.ceil(activitiesPayload.length / MAX_ACTIVITIES_PER_JOB);
-      
-      console.log(
-        `[MemberJob] ⚠️ Large activity set for ${job.displayName}/${dungeonName}: ` +
-        `${activitiesPayload.length} activities → split into ${numJobs} jobs ` +
-        `(max ${MAX_ACTIVITIES_PER_JOB} per job)`
+      const results = await Promise.allSettled(
+        batch.map(async (activity) => {
+          const instanceId = activity.activityDetails?.instanceId || activity.instanceId;
+          const pgcr = await fetchPGCR(instanceId, env.BUNGIE_API_KEY);
+          if (!pgcr) return null;
+
+          const isFullClear = determineClearType(pgcr, activity.period || '');
+
+          let playtime = 0;
+          try {
+            const entries = pgcr.entries || [];
+            const match = entries.find((e: any) => 
+              e?.player?.destinyUserInfo?.membershipId === job.membershipId
+            );
+            if (match && Number.isFinite(Number(match.values?.timePlayedSeconds?.basic?.value))) {
+              playtime = Number(match.values.timePlayedSeconds.basic.value);
+            }
+          } catch {
+            playtime = 0;
+          }
+
+          return { isFullClear, playtime, date: activity.period };
+        })
       );
 
-      for (let jobIndex = 0; jobIndex < numJobs; jobIndex++) {
-        const jobStart = jobIndex * MAX_ACTIVITIES_PER_JOB;
-        const jobEnd = Math.min(jobStart + MAX_ACTIVITIES_PER_JOB, activitiesPayload.length);
-        const jobActivities = activitiesPayload.slice(jobStart, jobEnd);
-
-        // Each sub-job gets its own jobId and BatchCoordinator instance
-        const subJobId = `${jobId}-part${jobIndex}`;
-
-        // Split this sub-job into batches
-        const batches: any[][] = [];
-        for (let i = 0; i < jobActivities.length; i += PGCR_BATCH_SIZE) {
-          batches.push(jobActivities.slice(i, i + PGCR_BATCH_SIZE));
-        }
-
-        // Send all batches for this sub-job
-        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-          try {
-            await env.STATS_QUEUE.send({
-              clanId: job.clanId,
-              membershipId: job.membershipId,
-              membershipType: job.membershipType,
-              dungeonHash,
-              activities: batches[batchIndex],
-              jobId: subJobId,
-              batchIndex,
-              totalBatches: batches.length,
-              // Metadata to track this is part of a larger set
-              isPartialJob: true,
-              partIndex: jobIndex,
-              totalParts: numJobs,
-            });
-            totalQueued += batches[batchIndex].length;
-            totalBatches++;
-          } catch (err) {
-            console.error(
-              `[MemberJob] ❌ Failed to queue batch ${batchIndex} of sub-job ${jobIndex}/${dungeonName}:`, 
-              err
-            );
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value) {
+          pgcrSuccessCount++;
+          if (result.value.isFullClear) {
+            fullClearsFound++;
+          }
+          totalPlaytime += result.value.playtime || 0;
+          if (result.value.date && (!latestActivityDate || result.value.date > latestActivityDate)) {
+            latestActivityDate = result.value.date;
           }
         }
       }
+
+      // Rate limit between batches
+      if (i + PGCR_BATCH_SIZE < newActivities.length) {
+        await sleep(DELAY_MS);
+      }
     }
+
+    totalProcessed += pgcrSuccessCount;
+
+    if (pgcrSuccessCount === 0) {
+      console.log(`[MemberJob] ${dungeonName}: No PGCRs fetched, skipping DB write`);
+      continue;
+    }
+
+    // ========================================================================
+    // WRITE STATS DIRECTLY TO DB
+    // ========================================================================
+    const isNewRecord = !prevRow;
+    const prevClears = prevRow ? Number((prevRow as any).total_clears || 0) : 0;
+    const prevFullClears = prevRow ? Number((prevRow as any).total_full_clears || 0) : 0;
+    const prevPlaytime = prevRow ? Number((prevRow as any).total_playtime_seconds || 0) : 0;
+    const prevLastProcessedDate = prevRow ? (prevRow as any).last_processed_date : null;
+
+    const newTotalClears = prevClears + pgcrSuccessCount;
+    const newTotalFullClears = prevFullClears + fullClearsFound;
+    const newTotalPlaytime = prevPlaytime + totalPlaytime;
+
+    let finalLastProcessedDate = prevLastProcessedDate;
+    if (latestActivityDate) {
+      if (!finalLastProcessedDate || latestActivityDate > finalLastProcessedDate) {
+        finalLastProcessedDate = latestActivityDate;
+      }
+    }
+
+    try {
+      await upsertMemberDungeonStats(env.DB, {
+        clanId: job.clanId,
+        membershipId: job.membershipId,
+        membershipType: job.membershipType,
+        dungeonHash,
+        totalClears: newTotalClears,
+        totalFullClears: newTotalFullClears,
+        totalPlaytimeSeconds: newTotalPlaytime,
+        lastProcessedDate: finalLastProcessedDate,
+      });
+
+      await applyClanAggregateDelta(
+        env.DB,
+        job.clanId,
+        dungeonHash,
+        pgcrSuccessCount,
+        fullClearsFound,
+        totalPlaytime,
+        isNewRecord
+      );
+
+      totalWritten++;
+
+      console.log(
+        `[MemberJob] ✅ ${dungeonName}: clears=${newTotalClears} (+${pgcrSuccessCount}) ` +
+        `fullClears=${newTotalFullClears} (+${fullClearsFound})`
+      );
+    } catch (err) {
+      console.error(`[MemberJob] ❌ Failed to write stats for ${dungeonName}:`, err);
+    }
+  }
+
+  // Track progress
+  if (job.runId) {
+    await trackRunProgress(env.RUN_TRACKING_KV, job.runId, { processed: 1 }).catch(() => {});
   }
 
   const duration = Date.now() - startTime;
   console.log(
     `[MemberJob] COMPLETE: ${job.displayName} - ` +
-    `Queued ${totalQueued} activities in ${totalBatches} batch(es) - ` +
+    `Processed ${totalProcessed} activities, wrote ${totalWritten} dungeon stats - ` +
     `${Math.round(duration / 1000)}s`
   );
 }

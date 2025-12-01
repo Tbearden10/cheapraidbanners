@@ -22,6 +22,7 @@ id = "34b7e40402a34f3584da2da2c66ae43c"
 
 # ===== QUEUE CONFIGURATION =====
 # Producer / consumer for member jobs
+# Each member is processed completely in one worker invocation
 [[queues.producers]]
 binding = "MEMBER_STATS_QUEUE"
 queue = "member-stats-queue"
@@ -32,20 +33,22 @@ max_batch_size = 1
 max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "member-stats-dlq"
-max_concurrency = 1
+max_concurrency = 5  # Process 5 members in parallel (each is isolated)
 
-# Producer / consumer for PGCR / stats jobs
+# STATS_QUEUE is no longer used - processing happens inline in memberJobProcessor
+# Keeping producer binding for backwards compatibility
 [[queues.producers]]
 binding = "STATS_QUEUE"
 queue = "stats-queue"
 
-[[queues.consumers]]
-queue = "stats-queue"
-max_batch_size = 1
-max_batch_timeout = 5
-max_retries = 3
-dead_letter_queue = "stats-dlq"
-max_concurrency = 10
+# Commenting out STATS_QUEUE consumer - no longer needed
+# [[queues.consumers]]
+# queue = "stats-queue"
+# max_batch_size = 1
+# max_batch_timeout = 5
+# max_retries = 3
+# dead_letter_queue = "stats-dlq"
+# max_concurrency = 10
 
 # ===== DURABLE OBJECTS =====
 [[durable_objects.bindings]]
@@ -98,17 +101,20 @@ max_batch_size = 1
 max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "member-stats-dlq-local"
+max_concurrency = 5
 
+# STATS_QUEUE producer kept for backwards compatibility
 [[env.dev.queues.producers]]
 binding = "STATS_QUEUE"
 queue = "stats-queue-local"
 
-[[env.dev.queues.consumers]]
-queue = "stats-queue-local"
-max_batch_size = 1
-max_batch_timeout = 5
-max_retries = 3
-dead_letter_queue = "stats-dlq-local"
+# STATS_QUEUE consumer no longer needed
+# [[env.dev.queues.consumers]]
+# queue = "stats-queue-local"
+# max_batch_size = 1
+# max_batch_timeout = 5
+# max_retries = 3
+# dead_letter_queue = "stats-dlq-local"
 
 # Durable Objects (same bindings, local instances)
 [[env.dev.durable_objects.bindings]]

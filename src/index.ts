@@ -4,7 +4,7 @@
 // when running member sync (enrichment of emblems runs in parallel batches).
 // ============================================================================
 
-import type { Env, MemberJob, StatsQueueJob } from './types';
+import type { Env, MemberJob } from './types';
 import {
   fetchClanRoster,
   enrichMemberWithEmblem,
@@ -16,7 +16,7 @@ import {
 import { trackRunStart, trackRunProgress, trackRunComplete, getRunInfo, getLatestRuns } from './kv/runTracker'
 import { getMembersList, upsertClanMember } from './db/queries';
 import { processMemberJob } from './processors/memberJobProcessor';
-import { processStatsQueueJob } from './processors/statsQueueProcessor';
+// BatchCoordinator kept for migration compatibility but no longer used
 export { BatchCoordinator } from './durable-objects/BatchCoordinator';
 
 async function promisePool<T, R>(
@@ -751,7 +751,7 @@ export default {
     }
   },
 
-  // Queue consumer
+  // Queue consumer - now only handles MemberJob (simplified pipeline)
   async queue(batch: any, env: Env, ctx?: any): Promise<void> {
     console.log(`\n[Queue] Received batch with ${batch.messages.length} message(s)`);
     const batchId = Math.random().toString(36).slice(2, 8);
@@ -764,18 +764,14 @@ export default {
       const body = message.body;
 
       try {
-        if (body && 'displayName' in body && 'runId' in body) {
+        // All queue messages are now MemberJob - each member processed completely
+        if (body && 'membershipId' in body && 'clanId' in body) {
           const job = body as MemberJob;
           await processMemberJob(env, job);
           message.ack();
           processedCount++;
-        } else if (body && 'jobId' in body && 'activities' in body) {
-          const job = body as StatsQueueJob;
-          await processStatsQueueJob(env, job);
-          message.ack();
-          processedCount++;
         } else {
-          errorCount++;
+          console.warn(`[Queue:${batchId}] Unknown message format, acking to prevent retry loop`);
           message.ack();
         }
       } catch (err) {
@@ -785,7 +781,6 @@ export default {
       }
     }
 
-    // minimal summary
     console.log(`[Queue:${batchId}] processed=${processedCount} errors=${errorCount}`);
   },
 
