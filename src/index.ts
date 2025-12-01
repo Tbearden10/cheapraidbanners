@@ -2,14 +2,14 @@
 export { BatchCoordinator } from './durable-objects/BatchCoordinator';
 export { RunTracker } from './durable-objects/RunTracker';
 
-import type { Env } from './types';
+import type { Env, MemberJob, ExecutionContext } from './types';
 import { fetchClanRoster, enrichMemberWithEmblem, fetchCharactersForMember, fetchActivitiesForCharacter, fetchPGCR, fetchActivityDefinition } from './api/bungieApi';
 import {
   getMembersList,
   upsertClanMember,
   getClanAggregateStats,
 } from './db/queries';
-import { promisePool } from './processors/memberStatsProcessor';
+import { promisePool, processMemberStats } from './processors/memberStatsProcessor';
 import { resolveLastOnlineStatusChangeToMs } from './utils/lastOnlineResolver';
 
 // CORS Configuration
@@ -441,6 +441,47 @@ export default {
       // Public GET endpoints
       const publicGetPaths = new Set(['/members', '/stats', '/activity-history', '/recent-activities', '/pgcr']);
 
+      // Internal endpoint for processing member stats (bypasses auth, uses internal header)
+      // This endpoint is called by the queue handler to process each member in a new worker invocation
+      if (url.pathname === '/internal/process-member' && request.method === 'POST') {
+        const internalSecret = request.headers.get('X-Internal-Secret');
+        if (internalSecret !== env.API_TOKEN) {
+          return jsonResponse({ error: 'Unauthorized' }, 401, request, env);
+        }
+
+        const job = await request.json() as MemberJob;
+        console.log(`[Internal] Processing member: ${job.displayName} (${job.membershipId})`);
+
+        try {
+          await processMemberStats(env, job);
+
+          // Notify RunTracker of completion
+          if (job.runId && env.RUN_TRACKER) {
+            try {
+              const trackerId = env.RUN_TRACKER.idFromName(`run-tracker-${job.clanId}`);
+              const tracker = env.RUN_TRACKER.get(trackerId);
+              await tracker.fetch('https://internal/complete', {
+                method: 'POST',
+                body: JSON.stringify({ runId: job.runId, membershipId: job.membershipId }),
+                headers: { 'Content-Type': 'application/json' },
+              });
+            } catch (err) {
+              console.warn('[Internal] Failed to notify RunTracker', job.membershipId, err);
+            }
+          }
+
+          console.log(`[Internal] ✅ Completed: ${job.displayName}`);
+          return jsonResponse({ success: true, membershipId: job.membershipId }, 200, request, env);
+        } catch (error: any) {
+          console.error('[Internal] ❌ Failed to process member:', error);
+          return jsonResponse({ 
+            success: false, 
+            error: error?.message || String(error),
+            membershipId: job.membershipId 
+          }, 500, request, env);
+        }
+      }
+
       // Auth check for protected endpoints
       if (!(request.method === 'GET' && publicGetPaths.has(url.pathname))) {
         if (!isAuthenticated(request, env)) {
@@ -744,64 +785,72 @@ export default {
     }
   },
 
-  async queue(batch: any, env: Env) {
+  /**
+   * Queue Handler - Dispatches each batch message to a new worker invocation.
+   * 
+   * This design ensures that for N messages in a batch, N separate worker invocations
+   * are spawned. Each message is dispatched to the `/internal/process-member` endpoint
+   * via fetch, which creates a new worker invocation for each member.
+   * 
+   * Benefits:
+   * - Avoids platform execution time limits by spreading work across invocations
+   * - For 100 batches, 100 workers are created, resulting in 100 new invocations
+   * - Each invocation handles one member's stats processing independently
+   * - Better resource isolation and fault tolerance per member
+   */
+  async queue(batch: any, env: Env, ctx: ExecutionContext) {
     console.log(`\n[Queue] Received batch with ${batch.messages.length} message(s)`);
+    console.log(`[Queue] Dispatching each message to a new worker invocation`);
 
     const queueConcurrency = Number((env as any).QUEUE_PROCESS_CONCURRENCY) || 1;
 
-    // PRELOAD the memberStatsProcessor module once so the dynamic import doesn't
-    // serialize per-worker execution. This ensures workers can start work
-    // in parallel immediately rather than waiting for repeated module loads.
-    let processMemberStats: any = null;
-    try {
-      const mod = await import('./processors/memberStatsProcessor');
-      processMemberStats = mod.processMemberStats;
-    } catch (e) {
-      console.warn('[Queue] Failed to preload memberStatsProcessor, will import per-message', e);
-    }
+    // Determine the worker URL for self-invocation
+    // In production, use the configured route; in dev, use localhost
+    const workerUrl = env.ENVIRONMENT === 'dev' || env.ENVIRONMENT === 'development'
+      ? 'http://localhost:8787'
+      : 'https://api.cheapraidbanners.com';
 
     await promisePool(
       batch.messages,
       async (message: any) => {
+        const job = message.body as any;
+        console.log(`[Queue] Dispatching member: ${job.displayName} (${job.membershipId}) at ${new Date().toISOString()}`);
+
         try {
-          const job = message.body as any;
-          // Log immediate start so you can see two "START" lines when concurrency > 1
-          console.log(`[Queue] START processing member: ${job.displayName} (${job.membershipId}) at ${new Date().toISOString()}`);
+          // Dispatch to a new worker invocation via fetch to the internal endpoint
+          // This creates a new worker invocation for each member, ensuring:
+          // - 100 batches → 100 workers → 100 new invocations
+          const response = await fetch(`${workerUrl}/internal/process-member`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Internal-Secret': env.API_TOKEN,
+            },
+            body: JSON.stringify(job),
+          });
 
-          // If preload failed above, fall back to importing inside worker (cached by the platform)
-          if (!processMemberStats) {
-            const mod = await import('./processors/memberStatsProcessor');
-            processMemberStats = mod.processMemberStats;
-          }
-
-          await processMemberStats(env, job);
-
-          if (job.runId && env.RUN_TRACKER) {
+          if (response.ok) {
             try {
-              const trackerId = env.RUN_TRACKER.idFromName(`run-tracker-${job.clanId}`);
-              const tracker = env.RUN_TRACKER.get(trackerId);
-              await tracker.fetch('https://internal/complete', {
-                method: 'POST',
-                body: JSON.stringify({ runId: job.runId, membershipId: job.membershipId }),
-                headers: { 'Content-Type': 'application/json' },
-              });
-            } catch (err) {
-              console.warn('[Queue] Failed to notify RunTracker', job.membershipId, err);
+              message.ack();
+            } catch (e) {
+              console.warn('[Queue] Failed to ack message:', e);
+            }
+            console.log(`[Queue] ✅ Dispatched successfully: ${job.displayName}`);
+          } else {
+            const errorBody = await response.text().catch(() => 'Unknown error');
+            console.error(`[Queue] ❌ Dispatch failed for ${job.displayName}: ${response.status} - ${errorBody}`);
+            try {
+              message.retry();
+            } catch (e) {
+              console.warn('[Queue] Failed to retry message:', e);
             }
           }
-
-          try {
-            message.ack();
-          } catch (e) {
-            console.warn('Failed to ack message:', e);
-          }
-          console.log(`[Queue] ✅ Completed: ${job.displayName}`);
         } catch (error) {
-          console.error('[Queue] ❌ Failed to process message:', error);
+          console.error('[Queue] ❌ Failed to dispatch message:', error);
           try {
             message.retry();
           } catch (e) {
-            console.warn('Failed to retry message:', e);
+            console.warn('[Queue] Failed to retry message:', e);
           }
         }
         return null;

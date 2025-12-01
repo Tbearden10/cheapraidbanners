@@ -57,6 +57,14 @@ export interface DurableObjectNamespace {
   get(id: DurableObjectId): DurableObjectInstance;
 }
 
+/**
+ * ExecutionContext provides waitUntil for background processing
+ */
+export interface ExecutionContext {
+  waitUntil(promise: Promise<any>): void;
+  passThroughOnException(): void;
+}
+
 /** Env passed to worker handlers */
 export interface Env {
   DB: D1Database;

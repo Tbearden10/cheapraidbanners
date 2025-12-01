@@ -40,17 +40,32 @@ database_name = "clan-stats"
 database_id = "b1e78f39-6cba-4c21-a822-95e4634d6370"
 
 # ===== QUEUE CONFIGURATION =====
+# 
+# Queue Processing Architecture:
+# Each queue message represents a single member to process. The queue handler
+# dispatches each message to a new worker invocation via the /internal/process-member
+# endpoint. This ensures:
+#
+# - 100 batches → 100 workers → 100 new invocations
+# - Each worker invocation handles exactly one member's stats processing
+# - Avoids platform execution time limits by distributing work across invocations
+# - Better resource isolation and fault tolerance per member
+#
+# The max_batch_size=1 ensures each message arrives as its own batch. Combined with
+# max_concurrency, this controls how many parallel worker invocations can process
+# members simultaneously.
+#
 [[queues.producers]]
 binding = "MEMBER_STATS_QUEUE"
 queue = "member-stats-queue"
 
 [[queues.consumers]]
 queue = "member-stats-queue"
-max_batch_size = 1              # Process 1 member per batch (SEQUENTIAL)
-max_batch_timeout = 5          # Wait 30s to fill batch
+max_batch_size = 1              # Each message arrives as its own batch for separate invocation
+max_batch_timeout = 5           # Wait 5s to fill batch (minimal since batch_size=1)
 max_retries = 3                 # Retry failed members 3 times
 dead_letter_queue = "member-stats-dlq"
-max_concurrency = 10
+max_concurrency = 10            # Up to 10 parallel worker invocations processing members
 
 # ===== DURABLE OBJECTS =====
 [[durable_objects.bindings]]
@@ -106,9 +121,11 @@ database_id = "fe0acf69-ffd3-4c6c-879f-f928ecec0f2c"
 binding = "MEMBER_STATS_QUEUE"
 queue = "member-stats-queue-local"
 
+# Dev queue configuration mirrors production architecture:
+# Each message dispatches to a new worker invocation via /internal/process-member
 [[env.dev.queues.consumers]]
 queue = "member-stats-queue-local"
-max_batch_size = 1
+max_batch_size = 1              # Each message arrives as its own batch
 max_batch_timeout = 50
 max_retries = 3
 dead_letter_queue = "member-stats-dlq-local"
