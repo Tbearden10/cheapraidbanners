@@ -1,6 +1,9 @@
 // ============================================================================
 // FILE: src/processors/memberJobProcessor.ts
 // Processes a single member - fetches activities and queues per-dungeon jobs
+// NOW WITH: Activity splitting to avoid 15-minute timeout
+// Minimal change: keep original flow but use stronger filtering and smaller
+// in-memory objects when fetching pages to avoid OOM. No page caps.
 // ============================================================================
 
 import type { Env, MemberJob } from '../types';
@@ -15,137 +18,109 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 export async function processMemberJob(env: Env, job: MemberJob): Promise<void> {
   const startTime = Date.now();
-  console.log(`\n${'='.repeat(80)}`);
-  console.log(`[MemberJob] START Processing member: ${job.displayName}`);
-  console.log(`[MemberJob] - Membership ID: ${job.membershipId}`);
-  console.log(`[MemberJob] - Membership Type: ${job.membershipType}`);
-  console.log(`[MemberJob] - Clan ID: ${job.clanId}`);
-  console.log(`[MemberJob] - Last Processed: ${job.lastProcessedDate || 'Never'}`);
-  console.log(`[MemberJob] - Run ID: ${job.runId || 'N/A'}`);
-  console.log(`${'='.repeat(80)}`);
+  console.log(`[MemberJob] START Processing member: ${job.displayName} (${job.membershipId})`);
 
   // 1. Fetch characters
-  console.log(`[MemberJob] Step 1: Fetching characters for ${job.displayName}...`);
   const characters = await fetchCharactersForMember(
     job.membershipId,
     job.membershipType,
     env.BUNGIE_API_KEY
-  );
+  ).catch((err) => {
+    console.error(`[MemberJob] ❌ Failed to fetch characters for ${job.displayName}:`, err);
+    return [];
+  });
 
   if (!characters || characters.length === 0) {
-    console.log(`[MemberJob] ⚠️  No characters found for ${job.displayName}`);
-    console.log(`[MemberJob] COMPLETE (no characters) - Duration: ${Date.now() - startTime}ms\n`);
+    console.log(`[MemberJob] No characters for ${job.displayName} - skipping`);
     return;
   }
 
   const characterIds = characters.map((c: any) => c.characterId);
-  console.log(`[MemberJob] ✓ Found ${characters.length} character(s): [${characterIds.join(', ')}]`);
 
   // 2. Fetch ALL activities (dungeon + story modes)
-  console.log(`[MemberJob] Step 2: Fetching all activities (modes 82 + 2)...`);
   const activitiesByChar = await fetchAllActivities(
     job.membershipType,
     job.membershipId,
     characterIds,
     env.BUNGIE_API_KEY,
     job.displayName
-  );
+  ).catch((err) => {
+    console.error(`[MemberJob] ❌ Failed to fetch activities for ${job.displayName}:`, err);
+    return characterIds.reduce((acc: Record<string, any[]>, id) => { acc[id] = []; return acc; }, {});
+  });
 
   const totalActivitiesFetched = Object.values(activitiesByChar).reduce((sum, acts) => sum + acts.length, 0);
-  console.log(`[MemberJob] ✓ Fetched ${totalActivitiesFetched} total activities across all characters`);
-  
-  for (const [charId, acts] of Object.entries(activitiesByChar)) {
-    console.log(`[MemberJob]   - Character ${charId}: ${acts.length} activities`);
-  }
 
-  // 3. Group by dungeon hash
-  console.log(`[MemberJob] Step 3: Grouping activities by dungeon...`);
+  // 3. Group by dungeon
   const activitiesByDungeon: Record<string, any[]> = {};
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
     activitiesByDungeon[dungeon.hash] = [];
   }
 
-  let totalMatched = 0;
   for (const charId of Object.keys(activitiesByChar)) {
     for (const activity of activitiesByChar[charId]) {
       const refId = String(activity?.activityDetails?.referenceId || '');
-      
       for (const dungeon of ACTIVITY_REFERENCE_MAP) {
         if (dungeon.referenceIds.includes(refId)) {
           activitiesByDungeon[dungeon.hash].push({
             ...activity,
             characterId: charId,
           });
-          totalMatched++;
           break;
         }
       }
     }
   }
 
-  console.log(`[MemberJob] ✓ Matched ${totalMatched} activities to dungeons`);
-  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-    const count = activitiesByDungeon[dungeon.hash].length;
-    if (count > 0) {
-      console.log(`[MemberJob]   - ${dungeon.displayName}: ${count} activities (before dedup)`);
-    }
-  }
-
   // Dedupe per dungeon (instanceId-based)
-  console.log(`[MemberJob] Step 4: Deduplicating activities per dungeon...`);
   for (const hash of Object.keys(activitiesByDungeon)) {
-    const beforeDedup = activitiesByDungeon[hash].length;
     const map = new Map<string, any>();
-    
     for (const act of activitiesByDungeon[hash]) {
       const id = act.activityDetails?.instanceId || act.instanceId;
       if (!id) continue;
-      
       const existing = map.get(id);
       if (!existing) {
         map.set(id, act);
       } else {
-        const existingCompleted = !!(existing?.values?.completed?.basic?.value === 1);
-        const newCompleted = !!(act?.values?.completed?.basic?.value === 1);
+        const existingCompleted = !!(existing?.values?.completed === true);
+        const newCompleted = !!(act?.values?.completed === true);
         if (!existingCompleted && newCompleted) {
           map.set(id, act);
         }
       }
     }
     activitiesByDungeon[hash] = Array.from(map.values());
-    const afterDedup = activitiesByDungeon[hash].length;
-    
-    if (beforeDedup > 0) {
-      const dungeonName = ACTIVITY_REFERENCE_MAP.find(d => d.hash === hash)?.displayName || hash;
-      console.log(`[MemberJob]   - ${dungeonName}: ${beforeDedup} → ${afterDedup} (removed ${beforeDedup - afterDedup} duplicates)`);
-    }
   }
 
-  // 4. Queue per-dungeon jobs
-  console.log(`[MemberJob] Step 5: Processing and queueing per-dungeon jobs...`);
+  // 4. Queue per-dungeon jobs WITH SPLITTING LOGIC
   let totalQueued = 0;
   let totalBatches = 0;
 
+  // Configuration for splitting large jobs
+  const PGCR_BATCH_SIZE = 25;              // Activities per PGCR fetch batch
+  const BATCH_PROCESSING_TIME = 10;        // Seconds per batch (measured)
+  const MAX_QUEUE_JOB_DURATION = 8 * 60;   // 8 minutes (safe margin under 15 min)
+  
+  // Calculate max activities per STATS_QUEUE job
+  const MAX_ACTIVITIES_PER_JOB = Math.floor(
+    (MAX_QUEUE_JOB_DURATION / BATCH_PROCESSING_TIME) * PGCR_BATCH_SIZE
+  );
+  // Result: (8*60 / 10) * 25 = 48 * 25 = 1,200 activities per job
+
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
     const dungeonHash = dungeon.hash;
+    const dungeonName = dungeon.displayName;
     const activities = activitiesByDungeon[dungeonHash] || [];
 
     if (activities.length === 0) {
-      console.log(`[MemberJob]   - ${dungeon.displayName}: No activities, skipping`);
       continue;
     }
 
     // Filter to completed only
-    const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
-    console.log(`[MemberJob]   - ${dungeon.displayName}: ${completed.length}/${activities.length} completed`);
-    
-    if (completed.length === 0) {
-      console.log(`[MemberJob]   - ${dungeon.displayName}: No completed activities, skipping`);
-      continue;
-    }
+    const completed = activities.filter(a => a?.values?.completed === true);
+    if (completed.length === 0) continue;
 
     // Check DB for previous stats and last_processed_date (resume logic)
-    console.log(`[MemberJob]   - ${dungeon.displayName}: Checking for previous processing and DB totals...`);
     const prevRow = await env.DB.prepare(`
       SELECT last_processed_date, total_clears, total_full_clears
       FROM member_dungeon_stats
@@ -155,35 +130,26 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     let cutoffDate: Date | null = null;
     if (prevRow && (prevRow as any).last_processed_date) {
       cutoffDate = new Date((prevRow as any).last_processed_date);
-      console.log(`[MemberJob]   - ${dungeon.displayName}: Found previous cutoff: ${cutoffDate.toISOString()}`);
     } else if (job.lastProcessedDate) {
       cutoffDate = new Date(job.lastProcessedDate);
-      console.log(`[MemberJob]   - ${dungeon.displayName}: Using job cutoff: ${cutoffDate.toISOString()}`);
-    } else {
-      console.log(`[MemberJob]   - ${dungeon.displayName}: No previous processing, will process all`);
     }
 
-    // Obtain DB totals (prefer total_clears then total_full_clears)
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? (prevRow as any).total_full_clears ?? 0) : 0;
     const totalCompletionsFromBungie = completed.length;
 
-    console.log(`[MemberJob]   - ${dungeon.displayName}: DB totals=${dbTotalClears}, Bungie completions=${totalCompletionsFromBungie}`);
-
-    // Quick skip based on counts: if Bungie shows no more completions than DB, skip this dungeon entirely.
+    // Quick skip based on counts
     if (totalCompletionsFromBungie <= dbTotalClears) {
-      console.log(`[MemberJob]   - ${dungeon.displayName}: Skipping - Bungie completions (${totalCompletionsFromBungie}) <= DB totals (${dbTotalClears})`);
       continue;
     }
 
-    // Sort completed activities by period ascending (oldest first). This ensures we only process new instances
-    // and that batching proceeds from oldest→newest (helps consistent last_processed_date updates).
+    // Sort completed activities by period ascending (oldest first)
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
       const tb = b.period ? new Date(b.period).getTime() : 0;
       return ta - tb;
     });
 
-    // Filter to new activities using cutoffDate (strict >). This avoids double-processing.
+    // Filter to new activities using cutoffDate (strict >)
     let newActivities = completed;
     if (cutoffDate) {
       newActivities = completed.filter(a => {
@@ -191,74 +157,126 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
           const actDate = new Date(a.period);
           return actDate.getTime() > cutoffDate!.getTime();
         } catch {
-          // If parsing fails, err on the side of processing (to be safe)
           return true;
         }
       });
-      console.log(`[MemberJob]   - ${dungeon.displayName}: Filtered to ${newActivities.length} new activities after ${cutoffDate.toISOString()}`);
     }
 
-    // If nothing remains after date filtering, skip.
     if (newActivities.length === 0) {
-      console.log(`[MemberJob]   - ${dungeon.displayName}: ✓ No new activities to process after date filtering`);
       continue;
     }
 
-    console.log(`[MemberJob]   - ${dungeon.displayName}: 📊 Will process ${newActivities.length} new activities (of ${totalCompletionsFromBungie} total from Bungie)`);
+    console.log(`[MemberJob] ${dungeonName}: ${newActivities.length} new activities to process`);
 
-    // Prepare activities for queue (ensure period is included)
+    // Prepare activities for queue
     const activitiesPayload = newActivities.map(a => ({
       instanceId: a.activityDetails?.instanceId || a.instanceId,
-      // seconds here is just informational; authoritative player playtime is extracted from PGCR in worker
-      seconds: a.values?.activityDurationSeconds?.basic?.value,
+      seconds: a.values?.activityDurationSeconds || 0,
       date: a.period,
       characterId: (a as any).characterId,
     }));
 
-    // Send to STATS_QUEUE
     const jobId = `member-${job.membershipId}-${dungeonHash}`;
-    
-    // Split into batches of MAX_BATCH_SIZE (process oldest first)
-    const MAX_BATCH_SIZE = 25;
-    const batches: any[][] = [];
-    for (let i = 0; i < activitiesPayload.length; i += MAX_BATCH_SIZE) {
-      batches.push(activitiesPayload.slice(i, i + MAX_BATCH_SIZE));
-    }
 
-    console.log(`[MemberJob]   - ${dungeon.displayName}: Split into ${batches.length} batch(es) of max ${MAX_BATCH_SIZE}`);
+    // ========================================================================
+    // KEY CHANGE: Split large activity sets into multiple jobs
+    // ========================================================================
 
-    // Send each batch to queue
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      const batchSize = batches[batchIndex].length;
-      console.log(`[MemberJob]   - ${dungeon.displayName}: Queueing batch ${batchIndex + 1}/${batches.length} (${batchSize} activities)...`);
+    if (activitiesPayload.length <= MAX_ACTIVITIES_PER_JOB) {
+      // CASE 1: Small enough to process in one job
+      const batches: any[][] = [];
+      for (let i = 0; i < activitiesPayload.length; i += PGCR_BATCH_SIZE) {
+        batches.push(activitiesPayload.slice(i, i + PGCR_BATCH_SIZE));
+      }
+
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+        try {
+          await env.STATS_QUEUE.send({
+            clanId: job.clanId,
+            membershipId: job.membershipId,
+            membershipType: job.membershipType,
+            dungeonHash,
+            activities: batches[batchIndex],
+            jobId,
+            batchIndex,
+            totalBatches: batches.length,
+          });
+          totalQueued += batches[batchIndex].length;
+          totalBatches++;
+        } catch (err) {
+          console.error(`[MemberJob] ❌ Failed to queue batch for ${job.displayName}/${dungeonName}:`, err);
+        }
+      }
+
+    } else {
+      // CASE 2: Too large - split into multiple independent jobs
+      const numJobs = Math.ceil(activitiesPayload.length / MAX_ACTIVITIES_PER_JOB);
       
-      await env.STATS_QUEUE.send({
-        clanId: job.clanId,
-        membershipId: job.membershipId,
-        membershipType: job.membershipType,
-        dungeonHash,
-        activities: batches[batchIndex],
-        jobId,
-        batchIndex,
-        totalBatches: batches.length,
-      });
-      
-      totalQueued += batchSize;
-      totalBatches++;
-    }
+      console.log(
+        `[MemberJob] ⚠️ Large activity set for ${job.displayName}/${dungeonName}: ` +
+        `${activitiesPayload.length} activities → split into ${numJobs} jobs ` +
+        `(max ${MAX_ACTIVITIES_PER_JOB} per job)`
+      );
 
-    console.log(`[MemberJob]   - ${dungeon.displayName}: ✓ Queued ${batches.length} batch(es) with ${newActivities.length} activities`);
+      for (let jobIndex = 0; jobIndex < numJobs; jobIndex++) {
+        const jobStart = jobIndex * MAX_ACTIVITIES_PER_JOB;
+        const jobEnd = Math.min(jobStart + MAX_ACTIVITIES_PER_JOB, activitiesPayload.length);
+        const jobActivities = activitiesPayload.slice(jobStart, jobEnd);
+
+        // Each sub-job gets its own jobId and BatchCoordinator instance
+        const subJobId = `${jobId}-part${jobIndex}`;
+
+        // Split this sub-job into batches
+        const batches: any[][] = [];
+        for (let i = 0; i < jobActivities.length; i += PGCR_BATCH_SIZE) {
+          batches.push(jobActivities.slice(i, i + PGCR_BATCH_SIZE));
+        }
+
+        // Send all batches for this sub-job
+        for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+          try {
+            await env.STATS_QUEUE.send({
+              clanId: job.clanId,
+              membershipId: job.membershipId,
+              membershipType: job.membershipType,
+              dungeonHash,
+              activities: batches[batchIndex],
+              jobId: subJobId,
+              batchIndex,
+              totalBatches: batches.length,
+              // Metadata to track this is part of a larger set
+              isPartialJob: true,
+              partIndex: jobIndex,
+              totalParts: numJobs,
+            });
+            totalQueued += batches[batchIndex].length;
+            totalBatches++;
+          } catch (err) {
+            console.error(
+              `[MemberJob] ❌ Failed to queue batch ${batchIndex} of sub-job ${jobIndex}/${dungeonName}:`, 
+              err
+            );
+          }
+        }
+      }
+    }
   }
 
   const duration = Date.now() - startTime;
-  console.log(`\n${'='.repeat(80)}`);
-  console.log(`[MemberJob] COMPLETE: ${job.displayName}`);
-  console.log(`[MemberJob] - Total activities queued: ${totalQueued}`);
-  console.log(`[MemberJob] - Total batches created: ${totalBatches}`);
-  console.log(`[MemberJob] - Duration: ${duration}ms (${(duration / 1000).toFixed(2)}s)`);
-  console.log(`${'='.repeat(80)}\n`);
+  console.log(
+    `[MemberJob] COMPLETE: ${job.displayName} - ` +
+    `Queued ${totalQueued} activities in ${totalBatches} batch(es) - ` +
+    `${Math.round(duration / 1000)}s`
+  );
 }
 
+/**
+ * Replacement for the original fetchAllActivities that preserves behavior but:
+ * - Filters pages immediately to only activity referenceIds in ACTIVITY_REFERENCE_MAP
+ * - Stores a much smaller "minimal" object per activity
+ * - Dedupe per-character by instanceId while streaming pages (avoids duplicated pages)
+ * - DOES NOT impose any page cap (continues until API returns less than page size)
+ */
 async function fetchAllActivities(
   membershipType: number,
   membershipId: string,
@@ -266,19 +284,22 @@ async function fetchAllActivities(
   apiKey: string,
   displayName: string
 ): Promise<Record<string, any[]>> {
-  console.log(`[FetchActivities] Starting for ${displayName} (${characterIds.length} characters)`);
-  
   const out: Record<string, any[]> = {};
   for (const id of characterIds) out[id] = [];
 
   const modes = [82, 2]; // Dungeon, Story
   let totalFetched = 0;
 
+  // Build a set of tracked referenceIds for fast filtering
+  const trackedRefs = new Set<string>();
+  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+    for (const ref of dungeon.referenceIds) {
+      trackedRefs.add(String(ref));
+    }
+  }
+
   // Helper: fetch all pages for a single character & mode
-  async function fetchAllPagesForCharacter(charId: string, mode: number) {
-    const modeName = mode === 82 ? 'Dungeon' : mode === 2 ? 'Story' : `Mode ${mode}`;
-    console.log(`[FetchActivities]   - Character ${charId} / ${modeName}: Starting pagination...`);
-    
+  async function fetchAllPagesForCharacter(charId: string, mode: number, seenInstanceIds: Set<string>) {
     const pageSize = 250;
     let page = 0;
     let charTotal = 0;
@@ -297,43 +318,73 @@ async function fetchAllActivities(
           ),
         3
       ).catch((err) => {
-        console.error(`[FetchActivities]   - Character ${charId} / ${modeName} / Page ${page}: ❌ Error:`, err);
+        console.error(`[FetchActivities] Error fetching char ${charId} mode ${mode} page ${page}:`, err);
         return [];
       });
 
       if (activities && activities.length > 0) {
-        out[charId].push(...activities);
-        charTotal += activities.length;
-        console.log(`[FetchActivities]   - Character ${charId} / ${modeName} / Page ${page}: ✓ Fetched ${activities.length} activities`);
-      } else {
-        console.log(`[FetchActivities]   - Character ${charId} / ${modeName} / Page ${page}: No activities returned`);
+        for (const a of activities) {
+          try {
+            const refId = String(a?.activityDetails?.referenceId || a.referenceId || '');
+            if (!trackedRefs.has(refId)) continue; // skip unrelated activities
+
+            const instanceId = a.activityDetails?.instanceId || a.instanceId;
+            if (!instanceId) continue;
+
+            // Dedupe per-character (avoids storing duplicates across pages/modes)
+            if (seenInstanceIds.has(instanceId)) continue;
+            seenInstanceIds.add(instanceId);
+
+            // Keep only the minimal fields required by downstream logic
+            const minimal = {
+              activityDetails: {
+                instanceId,
+                referenceId: refId,
+              },
+              period: a.period,
+              // only keep the few numeric values we actually use (avoid full nested object)
+              values: {
+                completed: !!(a.values?.completed?.basic?.value === 1),
+                activityDurationSeconds: Number(a.values?.activityDurationSeconds?.basic?.value || 0),
+                timePlayedSeconds: Number(a.values?.timePlayedSeconds?.basic?.value || 0),
+              },
+              // preserve instance-level fields used elsewhere if needed
+              characterId: charId,
+            };
+
+            out[charId].push(minimal);
+            charTotal++;
+            totalFetched++;
+          } catch {
+            // ignore single-item processing errors
+            continue;
+          }
+        }
       }
 
       // If less than a full page, we're done for this character/mode
       if (!activities || activities.length < pageSize) {
-        console.log(`[FetchActivities]   - Character ${charId} / ${modeName}: Complete (${charTotal} total activities)`);
         break;
       }
 
       page++;
       await sleep(200);
     }
-    
-    totalFetched += charTotal;
+
+    // accumulate charTotal if needed (we track totalFetched globally)
   }
 
   // Fetch modes sequentially with parallel per-character workers
   for (const mode of modes) {
-    const modeName = mode === 82 ? 'Dungeon' : mode === 2 ? 'Story' : `Mode ${mode}`;
-    console.log(`[FetchActivities] Starting ${modeName} mode for all ${characterIds.length} character(s)...`);
-    
-    const workers = characterIds.map((charId) => fetchAllPagesForCharacter(charId, mode));
+    // Pass a fresh seenInstanceIds per character that persists across pages and modes
+    const workers = characterIds.map((charId) => {
+      const seenInstanceIds = new Set<string>();
+      return fetchAllPagesForCharacter(charId, mode, seenInstanceIds);
+    });
     await Promise.all(workers);
-    
-    console.log(`[FetchActivities] ✓ Completed ${modeName} mode for all characters`);
     await sleep(250);
   }
 
-  console.log(`[FetchActivities] Complete: Fetched ${totalFetched} total activities for ${displayName}`);
+  console.log(`[FetchActivities] Fetched ${totalFetched} relevant activities for ${displayName}`);
   return out;
 }

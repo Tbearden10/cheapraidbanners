@@ -1,11 +1,8 @@
-// Bungie API client functions with safe timeout handling and retries.
-// Ensures AbortController timers are cleaned up after each attempt.
-//
-// NOTE: Cloudflare Workers does not expose process.env, so we use sensible defaults here.
-// If you want to override these per-deploy, pass values from Env into callers or add a small config wrapper.
+// Bungie API client functions with reduced logging
+// Keep console.error for failures only.
 
-const DEFAULT_FETCH_TIMEOUT_MS = 12000; // matches wrangler.toml BUNGIE_PER_REQUEST_TIMEOUT_MS
-const DEFAULT_FETCH_RETRIES = 2;        // matches wrangler.toml BUNGIE_FETCH_RETRIES
+const DEFAULT_FETCH_TIMEOUT_MS = 12000;
+const DEFAULT_FETCH_RETRIES = 2;
 
 function createTimeoutSignal(timeoutMs: number) {
   const controller = new AbortController();
@@ -15,10 +12,6 @@ function createTimeoutSignal(timeoutMs: number) {
   return { signal, cleanup };
 }
 
-/**
- * Fetch with retry logic (exponential backoff).
- * Uses a per-attempt AbortController which is cleaned up after each fetch attempt.
- */
 async function fetchWithRetry(
   url: string,
   options: RequestInit = {},
@@ -34,19 +27,15 @@ async function fetchWithRetry(
         ...options,
         signal,
       });
-
-      // cleanup timer
       cleanup();
 
       if (response.ok) {
         return response;
       }
 
-      // Retry on 429 or 5xx
       if (response.status === 429 || (response.status >= 500 && response.status < 600)) {
         lastError = new Error(`HTTP ${response.status}`);
       } else {
-        // Non-retriable: return the response to allow caller to handle non-OK
         return response;
       }
     } catch (error) {
@@ -54,7 +43,6 @@ async function fetchWithRetry(
       lastError = error instanceof Error ? error : new Error(String(error));
     }
 
-    // Wait before retry (exponential backoff)
     if (attempt < retries) {
       const waitTime = Math.pow(2, attempt) * 500 + Math.random() * 200;
       await new Promise((resolve) => setTimeout(resolve, waitTime));
@@ -64,14 +52,6 @@ async function fetchWithRetry(
   throw lastError || new Error('Fetch failed after retries');
 }
 
-/**
- * withRateLimit: small helper to wrap any async call with retry/backoff behavior.
- * - fn: a zero-arg async function returning T
- * - maxRetries: number of retries
- *
- * This is intentionally generic so callers (like processors) can wrap per-page
- * or per-call actions and get consistent backoff behavior.
- */
 export async function withRateLimit<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   let attempt = 0;
   while (true) {
@@ -79,11 +59,9 @@ export async function withRateLimit<T>(fn: () => Promise<T>, maxRetries = 3): Pr
       return await fn();
     } catch (err: any) {
       attempt++;
-      // If we've exhausted retries, rethrow
       if (attempt > maxRetries) {
         throw err;
       }
-      // If the error looks like an AbortError, let's rethrow immediately
       if (err && typeof err === 'object' && 'name' in err && (err as any).name === 'AbortError') {
         throw err;
       }
@@ -93,28 +71,28 @@ export async function withRateLimit<T>(fn: () => Promise<T>, maxRetries = 3): Pr
   }
 }
 
-/** --- API helpers below: unchanged behavior but use fetchWithRetry --- */
-
 export async function fetchClanRoster(clanId: string, apiKey: string) {
   const url = `https://www.bungie.net/Platform/GroupV2/${clanId}/Members/`;
 
-  const response = await fetchWithRetry(url, {
-    headers: { 'X-API-Key': apiKey, Accept: 'application/json' },
-  });
-
-  const data = await response.json();
-  const results = data.Response?.results || [];
-
-  return (data?.Response?.results || []).map((result: any) => ({
-    membershipId: result.destinyUserInfo?.membershipId,
-    membershipType: result.destinyUserInfo?.membershipType,
-    displayName: result.destinyUserInfo?.displayName,
-    bungieGlobalDisplayName: result.destinyUserInfo?.bungieGlobalDisplayName,  // ADD THIS
-    bungieGlobalDisplayNameCode: result.destinyUserInfo?.bungieGlobalDisplayNameCode,  // ADD THIS
-    isOnline: result.isOnline,
-    lastOnlineStatusChange: result.lastOnlineStatusChange,
-    joinDate: result.joinDate,
-  }));
+  try {
+    const response = await fetchWithRetry(url, {
+      headers: { 'X-API-Key': apiKey, Accept: 'application/json' },
+    });
+    const data = await response.json();
+    return (data?.Response?.results || []).map((result: any) => ({
+      membershipId: result.destinyUserInfo?.membershipId,
+      membershipType: result.destinyUserInfo?.membershipType,
+      displayName: result.destinyUserInfo?.displayName,
+      bungieGlobalDisplayName: result.destinyUserInfo?.bungieGlobalDisplayName,
+      bungieGlobalDisplayNameCode: result.destinyUserInfo?.bungieGlobalDisplayNameCode,
+      isOnline: result.isOnline,
+      lastOnlineStatusChange: result.lastOnlineStatusChange,
+      joinDate: result.joinDate,
+    }));
+  } catch (err) {
+    console.error(`fetchClanRoster failed for clan ${clanId}:`, err);
+    return [];
+  }
 }
 
 export async function enrichMemberWithEmblem(member: any, apiKey: string) {
@@ -146,23 +124,28 @@ export async function enrichMemberWithEmblem(member: any, apiKey: string) {
 
 export async function fetchCharactersForMember(membershipId: string, membershipType: number, apiKey: string) {
   const url = `https://www.bungie.net/Platform/Destiny2/${membershipType}/Account/${membershipId}/Stats/`;
-  const response = await fetchWithRetry(url, { headers: { 'X-API-Key': apiKey, Accept: 'application/json' } });
-  const data = await response.json();
-  if (data.ErrorCode !== 1) {
-    throw new Error(data.Message || 'Bungie API error');
+  try {
+    const response = await fetchWithRetry(url, { headers: { 'X-API-Key': apiKey, Accept: 'application/json' } });
+    const data = await response.json();
+    if (data.ErrorCode !== 1) {
+      throw new Error(data.Message || 'Bungie API error');
+    }
+    let charactersArr: any[] = [];
+    const characters = data.Response?.characters;
+    if (Array.isArray(characters)) {
+      charactersArr = characters.map((char: any) => ({ characterId: char.characterId, deleted: !!char.deleted, dateLastPlayed: char.dateLastPlayed }));
+    } else if (characters && typeof characters === 'object') {
+      charactersArr = Object.entries(characters).map(([characterId, char]: [string, any]) => ({
+        characterId,
+        deleted: !!(char as any).deleted,
+        dateLastPlayed: (char as any).dateLastPlayed,
+      }));
+    }
+    return charactersArr.map((char) => ({ characterId: char.characterId, membershipId, membershipType, deleted: char.deleted }));
+  } catch (error) {
+    console.error(`fetchCharactersForMember failed for ${membershipId}:`, error);
+    return [];
   }
-  let charactersArr: any[] = [];
-  const characters = data.Response?.characters;
-  if (Array.isArray(characters)) {
-    charactersArr = characters.map((char: any) => ({ characterId: char.characterId, deleted: !!char.deleted, dateLastPlayed: char.dateLastPlayed }));
-  } else if (characters && typeof characters === 'object') {
-    charactersArr = Object.entries(characters).map(([characterId, char]: [string, any]) => ({
-      characterId,
-      deleted: !!(char as any).deleted,
-      dateLastPlayed: (char as any).dateLastPlayed,
-    }));
-  }
-  return charactersArr.map((char) => ({ characterId: char.characterId, membershipId, membershipType, deleted: char.deleted }));
 }
 
 export async function fetchActivitiesForCharacter(

@@ -1,6 +1,6 @@
 // ============================================================================
 // FILE: src/processors/statsQueueProcessor.ts
-// Processes PGCR batches - EXACT COPY of dungeon-info-hub logic
+// Processes PGCR batches with support for partial jobs (split large activity sets)
 // ============================================================================
 
 import type { Env, StatsQueueJob } from '../types';
@@ -15,7 +15,6 @@ const HAUNTED_START_MS = Date.parse('2022-05-24T17:00:00.000Z');
 
 function determineClearType(pgcr: any, period: string): boolean {
   const timestamp = Date.parse(period);
-  
   if (timestamp >= HAUNTED_START_MS) {
     return Boolean(pgcr.activityWasStartedFromBeginning);
   }
@@ -32,25 +31,24 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
   const startTime = Date.now();
   const isMultiBatch = job.totalBatches && job.totalBatches > 1;
   const batchIndex = job.batchIndex ?? 0;
+  const isPartialJob = job.isPartialJob || false;
 
-  console.log(`\n${'─'.repeat(80)}`);
-  console.log(`[StatsQueue] START Processing batch`);
-  console.log(`[StatsQueue] - Job ID: ${job.jobId}`);
-  console.log(`[StatsQueue] - Membership ID: ${job.membershipId}`);
-  console.log(`[StatsQueue] - Dungeon Hash: ${job.dungeonHash}`);
-  console.log(`[StatsQueue] - Batch: ${batchIndex + 1}/${job.totalBatches || 1} ${isMultiBatch ? '(Multi-batch)' : '(Single-batch)'}`);
-  console.log(`[StatsQueue] - Activities in batch: ${job.activities.length}`);
-  console.log(`${'─'.repeat(80)}`);
+  const jobLabel = isPartialJob 
+    ? `${job.jobId} [part ${(job.partIndex ?? 0) + 1}/${job.totalParts}]`
+    : job.jobId;
+
+  console.log(
+    `[StatsQueue] START job=${jobLabel} ` +
+    `membership=${job.membershipId} dungeon=${job.dungeonHash} ` +
+    `batch=${batchIndex + 1}/${job.totalBatches || 1}`
+  );
 
   // Initialize Durable Object (first batch only)
   if (isMultiBatch && batchIndex === 0) {
-    console.log(`[StatsQueue] Initializing BatchCoordinator for job ${job.jobId}...`);
-    
-    const doId = env.BATCH_COORDINATOR.idFromName(job.jobId);
-    const stub = env.BATCH_COORDINATOR.get(doId);
-    
     try {
-      await stub.fetch('https://fake/init', {
+      const doId = env.BATCH_COORDINATOR.idFromName(job.jobId);
+      const stub = env.BATCH_COORDINATOR.get(doId);
+      const initResp = await stub.fetch('https://fake/init', {
         method: 'POST',
         body: JSON.stringify({
           membershipId: job.membershipId,
@@ -59,9 +57,15 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
           totalBatches: job.totalBatches,
         }),
       });
-      console.log(`[StatsQueue] ✓ BatchCoordinator initialized`);
+
+      // Drain the response body
+      try {
+        await initResp.text();
+      } catch (e) {
+        // ignore body read errors
+      }
     } catch (err) {
-      console.error(`[StatsQueue] ❌ Failed to initialize BatchCoordinator:`, err);
+      console.error(`[StatsQueue] ❌ Failed to initialize BatchCoordinator for ${job.jobId}:`, err);
       throw err;
     }
   }
@@ -69,34 +73,30 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
   // Process activities (SEQUENTIAL PGCR fetches with rate limiting)
   const PGCR_BATCH_SIZE = 25;
   const DELAY_MS = 200;
-  
+
   let fullClearsFound = 0;
   let totalPlaytime = 0;
   let latestActivityDate: string | null = null;
   let pgcrSuccessCount = 0;
   let pgcrFailureCount = 0;
 
-  const totalIterations = Math.ceil(job.activities.length / PGCR_BATCH_SIZE);
-  console.log(`[StatsQueue] Processing ${job.activities.length} activities in ${totalIterations} PGCR batch(es) of ${PGCR_BATCH_SIZE}...`);
+  // Add timeout warning
+  const WARN_THRESHOLD = 10 * 60 * 1000; // 10 minutes
+  let lastWarning = startTime;
 
   for (let i = 0; i < job.activities.length; i += PGCR_BATCH_SIZE) {
     const batch = job.activities.slice(i, i + PGCR_BATCH_SIZE);
-    const currentBatch = Math.floor(i / PGCR_BATCH_SIZE) + 1;
-    
-    console.log(`[StatsQueue]   PGCR Batch ${currentBatch}/${totalIterations}: Fetching ${batch.length} PGCRs...`);
-    
+
     const results = await Promise.allSettled(
-      batch.map(async (activity, idx) => {
+      batch.map(async (activity) => {
         const pgcr = await fetchPGCR(activity.instanceId, env.BUNGIE_API_KEY);
-        
         if (!pgcr) {
-          console.log(`[StatsQueue]     - Activity ${i + idx + 1}: ❌ PGCR not found for ${activity.instanceId}`);
           return null;
         }
-        
+
         const isFullClear = determineClearType(pgcr, activity.date || '');
-        
-        // Extract playtime — use ONLY the player's timePlayedSeconds from the PGCR entries
+
+        // Extract playtime from PGCR
         let playtime = 0;
         try {
           const entries = pgcr.entries || [];
@@ -104,26 +104,13 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
             e?.player?.destinyUserInfo?.membershipId === job.membershipId
           );
           if (match && Number.isFinite(Number(match.values?.timePlayedSeconds?.basic?.value))) {
-            const extractedPlaytime = Number(match.values.timePlayedSeconds.basic.value);
-            // Log comparison with activity.seconds for visibility — but do not use activity.seconds as authoritative
-            if (activity.seconds && Number(activity.seconds) !== extractedPlaytime) {
-              console.log(`[StatsQueue]     - Activity ${i + idx + 1}: Using PGCR timePlayedSeconds ${extractedPlaytime}s (activity.seconds was ${activity.seconds})`);
-            } else {
-              console.log(`[StatsQueue]     - Activity ${i + idx + 1}: Using PGCR timePlayedSeconds ${extractedPlaytime}s`);
-            }
-            playtime = extractedPlaytime;
+            playtime = Number(match.values.timePlayedSeconds.basic.value);
           } else {
-            // No player-specific time found in PGCR — explicitly set to 0 and log for traceability
-            console.log(`[StatsQueue]     - Activity ${i + idx + 1}: No player timePlayedSeconds found in PGCR for membership ${job.membershipId}; playtime set to 0`);
             playtime = 0;
           }
-        } catch (err) {
-          console.warn(`[StatsQueue]     - Activity ${i + idx + 1}: Failed to extract timePlayedSeconds from PGCR:`, err);
+        } catch {
           playtime = 0;
         }
-
-        const clearType = isFullClear ? 'Full Clear' : 'Checkpoint';
-        console.log(`[StatsQueue]     - Activity ${i + idx + 1}: ✓ ${clearType} | ${playtime}s | ${activity.date}`);
 
         return { isFullClear, playtime, date: activity.date };
       })
@@ -131,14 +118,12 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
 
     let batchSuccesses = 0;
     let batchFailures = 0;
-    let batchFullClears = 0;
 
     for (const result of results) {
       if (result.status === 'fulfilled' && result.value) {
         batchSuccesses++;
         if (result.value.isFullClear) {
           fullClearsFound++;
-          batchFullClears++;
         }
         totalPlaytime += result.value.playtime || 0;
         if (result.value.date && (!latestActivityDate || result.value.date > latestActivityDate)) {
@@ -152,7 +137,15 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
     pgcrSuccessCount += batchSuccesses;
     pgcrFailureCount += batchFailures;
 
-    console.log(`[StatsQueue]   PGCR Batch ${currentBatch}/${totalIterations}: Complete - ${batchSuccesses} success, ${batchFailures} failed, ${batchFullClears} full clears`);
+    // Periodic timeout warning
+    const elapsed = Date.now() - startTime;
+    if (elapsed > WARN_THRESHOLD && elapsed - lastWarning > 60000) {
+      console.warn(
+        `[StatsQueue] ⚠️ Job ${jobLabel} running for ${Math.round(elapsed / 1000)}s ` +
+        `(${Math.round((i / job.activities.length) * 100)}% complete)`
+      );
+      lastWarning = Date.now();
+    }
 
     // Rate limit between PGCR batches
     if (i + PGCR_BATCH_SIZE < job.activities.length) {
@@ -160,65 +153,61 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
     }
   }
 
-  console.log(`[StatsQueue] PGCR Processing Complete:`);
-  console.log(`[StatsQueue] - Successful PGCRs: ${pgcrSuccessCount}/${job.activities.length}`);
-  console.log(`[StatsQueue] - Failed PGCRs: ${pgcrFailureCount}/${job.activities.length}`);
-  console.log(`[StatsQueue] - Full clears found: ${fullClearsFound}`);
-  console.log(`[StatsQueue] - Total playtime (this batch): ${totalPlaytime}s (${(totalPlaytime / 3600).toFixed(2)}h)`);
-  console.log(`[StatsQueue] - Latest activity: ${latestActivityDate || 'N/A'}`);
+  console.log(
+    `[StatsQueue] PGCR results for ${jobLabel}: ` +
+    `success=${pgcrSuccessCount}/${job.activities.length} ` +
+    `failed=${pgcrFailureCount} fullClears=${fullClearsFound} playtime=${totalPlaytime}s`
+  );
 
   const batchResult: BatchResult = {
     batchIndex,
     activitiesCount: job.activities.length,
     fullClearsFound,
-    // IMPORTANT: include per-batch playtime + latest activity so the DO can aggregate correctly
     playtimeSeconds: totalPlaytime,
     latestActivityDate,
   };
 
   // Send to Durable Object or write directly
   if (isMultiBatch) {
-    console.log(`[StatsQueue] Sending results to BatchCoordinator (batch ${batchIndex + 1}/${job.totalBatches})...`);
-    
-    const doId = env.BATCH_COORDINATOR.idFromName(job.jobId);
-    const stub = env.BATCH_COORDINATOR.get(doId);
-    
     try {
+      const doId = env.BATCH_COORDINATOR.idFromName(job.jobId);
+      const stub = env.BATCH_COORDINATOR.get(doId);
       const doResponse = await stub.fetch('https://fake/batch', {
         method: 'POST',
         body: JSON.stringify(batchResult),
       });
       const doResult = await doResponse.json() as { complete: boolean; aggregated?: any };
 
-      console.log(`[StatsQueue] ✓ BatchCoordinator response: complete=${doResult.complete}`);
-
       if (doResult.complete) {
         const agg = doResult.aggregated || {};
-        console.log(`[StatsQueue] 🎉 All batches complete! Final aggregation:`);
-        console.log(`[StatsQueue]   - Total activities: ${agg.totalActivities}`);
-        console.log(`[StatsQueue]   - Total full clears: ${agg.totalFullClears}`);
-        console.log(`[StatsQueue]   - Total playtime (aggregated): ${agg.totalPlaytimeSeconds}`);
-        console.log(`[StatsQueue]   - Latest activity: ${agg.latestActivityDate}`);
-        console.log(`[StatsQueue] Writing final stats to database...`);
-        
-        // Use the DO's aggregated totalPlaytimeSeconds (fallback to local totalPlaytime if missing)
         const aggregatedPlaytime = Number(agg.totalPlaytimeSeconds ?? 0);
-        await writeStatsToDb(env, job, agg.totalActivities, agg.totalFullClears, aggregatedPlaytime, agg.latestActivityDate);
-      } else {
-        console.log(`[StatsQueue] Waiting for remaining batches...`);
+        await writeStatsToDb(
+          env, 
+          job, 
+          agg.totalActivities, 
+          agg.totalFullClears, 
+          aggregatedPlaytime, 
+          agg.latestActivityDate
+        );
       }
     } catch (err) {
-      console.error(`[StatsQueue] ❌ Error communicating with BatchCoordinator:`, err);
+      console.error(`[StatsQueue] ❌ Error communicating with BatchCoordinator for ${job.jobId}:`, err);
       throw err;
     }
   } else {
-    console.log(`[StatsQueue] Single batch - writing directly to database...`);
-    await writeStatsToDb(env, job, job.activities.length, fullClearsFound, totalPlaytime, latestActivityDate);
+    // Single batch - write directly
+    await writeStatsToDb(
+      env, 
+      job, 
+      job.activities.length, 
+      fullClearsFound, 
+      totalPlaytime, 
+      latestActivityDate
+    );
   }
 
   const duration = Date.now() - startTime;
-  console.log(`[StatsQueue] COMPLETE - Duration: ${duration}ms (${(duration / 1000).toFixed(2)}s)`);
-  console.log(`${'─'.repeat(80)}\n`);
+  console.log(`[StatsQueue] COMPLETE job=${jobLabel} - duration=${Math.round(duration / 1000)}s`);
 }
 
 async function writeStatsToDb(
@@ -229,15 +218,19 @@ async function writeStatsToDb(
   totalPlaytime: number,
   lastProcessedDate: string | null
 ): Promise<void> {
-  console.log(`[StatsQueue:DB] Writing stats to database...`);
-  console.log(`[StatsQueue:DB] - Clan ID: ${job.clanId}`);
-  console.log(`[StatsQueue:DB] - Membership ID: ${job.membershipId}`);
-  console.log(`[StatsQueue:DB] - Dungeon Hash: ${job.dungeonHash}`);
+  
+  const isPartialJob = job.isPartialJob || false;
+  
+  if (isPartialJob) {
+    console.log(
+      `[StatsQueue:DB] Partial job ${(job.partIndex ?? 0) + 1}/${job.totalParts} ` +
+      `for ${job.membershipId}/${job.dungeonHash}`
+    );
+  }
 
   // Get previous stats
-  console.log(`[StatsQueue:DB] Fetching previous stats...`);
   const prevRow = await env.DB.prepare(`
-    SELECT total_clears, total_full_clears, total_playtime_seconds
+    SELECT total_clears, total_full_clears, total_playtime_seconds, last_processed_date
     FROM member_dungeon_stats
     WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
   `).bind(job.clanId, job.membershipId, job.dungeonHash).first();
@@ -245,34 +238,24 @@ async function writeStatsToDb(
   const prevClears = prevRow ? Number((prevRow as any).total_clears || 0) : 0;
   const prevFullClears = prevRow ? Number((prevRow as any).total_full_clears || 0) : 0;
   const prevPlaytime = prevRow ? Number((prevRow as any).total_playtime_seconds || 0) : 0;
+  const prevLastProcessedDate = prevRow ? (prevRow as any).last_processed_date : null;
 
   const isNewRecord = !prevRow;
-  
-  if (isNewRecord) {
-    console.log(`[StatsQueue:DB] No previous record found - creating new entry`);
-  } else {
-    console.log(`[StatsQueue:DB] Previous stats:`);
-    console.log(`[StatsQueue:DB]   - Clears: ${prevClears}`);
-    console.log(`[StatsQueue:DB]   - Full clears: ${prevFullClears}`);
-    console.log(`[StatsQueue:DB]   - Playtime: ${prevPlaytime}s`);
-  }
 
+  // CRITICAL: For partial jobs OR incremental updates, always ADD to existing totals
   const newTotalClears = prevClears + totalClears;
   const newTotalFullClears = prevFullClears + totalFullClears;
   const newTotalPlaytime = prevPlaytime + totalPlaytime;
 
-  console.log(`[StatsQueue:DB] Delta being applied:`);
-  console.log(`[StatsQueue:DB]   + Clears: ${totalClears}`);
-  console.log(`[StatsQueue:DB]   + Full clears: ${totalFullClears}`);
-  console.log(`[StatsQueue:DB]   + Playtime: ${totalPlaytime}s`);
-
-  console.log(`[StatsQueue:DB] New totals:`);
-  console.log(`[StatsQueue:DB]   = Clears: ${prevClears} + ${totalClears} = ${newTotalClears}`);
-  console.log(`[StatsQueue:DB]   = Full clears: ${prevFullClears} + ${totalFullClears} = ${newTotalFullClears}`);
-  console.log(`[StatsQueue:DB]   = Playtime: ${prevPlaytime}s + ${totalPlaytime}s = ${newTotalPlaytime}s (${(newTotalPlaytime / 3600).toFixed(2)}h)`);
+  // Update lastProcessedDate to the LATEST date seen
+  let finalLastProcessedDate = prevLastProcessedDate;
+  if (lastProcessedDate) {
+    if (!finalLastProcessedDate || lastProcessedDate > finalLastProcessedDate) {
+      finalLastProcessedDate = lastProcessedDate;
+    }
+  }
 
   // Write to DB
-  console.log(`[StatsQueue:DB] Upserting member_dungeon_stats...`);
   try {
     await upsertMemberDungeonStats(env.DB, {
       clanId: job.clanId,
@@ -282,31 +265,40 @@ async function writeStatsToDb(
       totalClears: newTotalClears,
       totalFullClears: newTotalFullClears,
       totalPlaytimeSeconds: newTotalPlaytime,
-      lastProcessedDate,
+      lastProcessedDate: finalLastProcessedDate,
     });
-    console.log(`[StatsQueue:DB] ✓ Successfully upserted member_dungeon_stats`);
   } catch (err) {
-    console.error(`[StatsQueue:DB] ❌ Failed to upsert member_dungeon_stats:`, err);
+    console.error(
+      `[StatsQueue:DB] ❌ Failed to upsert stats for ${job.membershipId}/${job.dungeonHash}:`,
+      err
+    );
     throw err;
   }
 
-  // Update clan aggregates (incremental)
-  console.log(`[StatsQueue:DB] Applying delta to clan aggregates...`);
+  // Update clan aggregates (incremental - delta from THIS job only)
   try {
     await applyClanAggregateDelta(
       env.DB,
       job.clanId,
       job.dungeonHash,
-      totalClears,
-      totalFullClears,
-      totalPlaytime,
+      totalClears,      // Delta from THIS job
+      totalFullClears,  // Delta from THIS job
+      totalPlaytime,    // Delta from THIS job
       isNewRecord
     );
-    console.log(`[StatsQueue:DB] ✓ Successfully updated clan aggregates`);
   } catch (err) {
-    console.error(`[StatsQueue:DB] ❌ Failed to update clan aggregates:`, err);
+    console.error(
+      `[StatsQueue:DB] ❌ Failed to update clan aggregates for ${job.clanId}/${job.dungeonHash}:`,
+      err
+    );
     throw err;
   }
 
-  console.log(`[StatsQueue:DB] ✅ Database write complete: ${newTotalFullClears} full clears (${newTotalClears} total)`);
+  console.log(
+    `[StatsQueue:DB] Updated stats: ${job.membershipId}/${job.dungeonHash} ` +
+    `totalClears=${newTotalClears} (+${totalClears}) ` +
+    `fullClears=${newTotalFullClears} (+${totalFullClears}) ` +
+    `playtime=${newTotalPlaytime}s (+${totalPlaytime}s)` +
+    (isPartialJob ? ` [partial ${(job.partIndex ?? 0) + 1}/${job.totalParts}]` : '')
+  );
 }

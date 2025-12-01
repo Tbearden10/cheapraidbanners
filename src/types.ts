@@ -1,5 +1,4 @@
-// Consolidated TypeScript types for the Clan Stats app.
-// Export the D1Database type (and other types) so all modules can import them.
+/// <reference types="@cloudflare/workers-types" />
 
 export interface D1PreparedStatement {
   bind(...args: any[]): D1PreparedStatement;
@@ -57,15 +56,17 @@ export interface DurableObjectNamespace {
   get(id: DurableObjectId): DurableObjectInstance;
 }
 
-/** Env passed to worker handlers */
+// In Env interface, remove RUN_TRACKER and add RUN_TRACKING_KV
 export interface Env {
   DB: D1Database;
   MEMBER_STATS_QUEUE: QueueBinding<any>;
   BATCH_COORDINATOR: DurableObjectNamespace;
-  RUN_TRACKER: DurableObjectNamespace;
+  STATS_QUEUE: QueueBinding<StatsQueueJob>;
+  RUN_TRACKING_KV: KVNamespace;  // Changed from RUN_TRACKER
   BUNGIE_API_KEY: string;
   BUNGIE_CLAN_ID: string;
   API_TOKEN: string;
+  ENVIRONMENT: string;
   [key: string]: any;
 }
 
@@ -132,10 +133,15 @@ export interface StatsQueueJob {
   activities: Array<{
     instanceId: string;
     seconds?: number;
-    date?: string;
+    date: string;
     characterId?: string;
   }>;
   jobId: string;
   batchIndex?: number;
   totalBatches?: number;
+  
+  // NEW: For handling large activity sets split across multiple jobs
+  isPartialJob?: boolean;  // True if this is part of a larger set
+  partIndex?: number;      // Which part (0-indexed)
+  totalParts?: number;     // Total number of parts
 }

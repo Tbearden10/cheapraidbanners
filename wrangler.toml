@@ -16,6 +16,10 @@ binding = "DB"
 database_name = "clan-stats"
 database_id = "b1e78f39-6cba-4c21-a822-95e4634d6370"
 
+[[kv_namespaces]]
+binding = "RUN_TRACKING_KV"
+id = "34b7e40402a34f3584da2da2c66ae43c"
+
 # ===== QUEUE CONFIGURATION =====
 # Producer / consumer for member jobs
 [[queues.producers]]
@@ -28,7 +32,7 @@ max_batch_size = 1
 max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "member-stats-dlq"
-max_concurrency = 10
+max_concurrency = 1
 
 # Producer / consumer for PGCR / stats jobs
 [[queues.producers]]
@@ -48,14 +52,10 @@ max_concurrency = 10
 name = "BATCH_COORDINATOR"
 class_name = "BatchCoordinator"
 
-[[durable_objects.bindings]]
-name = "RUN_TRACKER"
-class_name = "RunTracker"
-
 # ===== DURABLE OBJECT MIGRATIONS =====
 [[migrations]]
 tag = "v1"
-new_classes = ["BatchCoordinator", "RunTracker"]
+new_classes = ["BatchCoordinator"]
 
 # ===== CRON TRIGGERS =====
 [triggers]
@@ -69,6 +69,10 @@ crons = [
 pattern = "api.cheapraidbanners.com/*"
 zone_name = "cheapraidbanners.com"
 
+[limits]
+cpu_ms = 300000
+
+
 # ===== OPTIONAL: Development Environment Override =====
 [env.dev]
 [env.dev.vars]
@@ -79,6 +83,10 @@ BUNGIE_CLAN_ID = "5335552"
 binding = "DB"
 database_name = "clan-stats-local"
 database_id = "fe0acf69-ffd3-4c6c-879f-f928ecec0f2c"
+
+[[env.dev.kv_namespaces]]
+binding = "RUN_TRACKING_KV"
+id = "8c66598da19648ce945a39aee24da217"
 
 [[env.dev.queues.producers]]
 binding = "MEMBER_STATS_QUEUE"
@@ -106,7 +114,3 @@ dead_letter_queue = "stats-dlq-local"
 [[env.dev.durable_objects.bindings]]
 name = "BATCH_COORDINATOR"
 class_name = "BatchCoordinator"
-
-[[env.dev.durable_objects.bindings]]
-name = "RUN_TRACKER"
-class_name = "RunTracker"
