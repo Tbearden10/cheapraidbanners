@@ -123,3 +123,19 @@ export interface MemberJob {
   lastProcessedDate?: string | null;
   runId?: string | null;
 }
+
+export interface StatsQueueJob {
+  clanId: string;
+  membershipId: string;
+  membershipType: number;
+  dungeonHash: string;
+  activities: Array<{
+    instanceId: string;
+    seconds?: number;
+    date?: string;
+    characterId?: string;
+  }>;
+  jobId: string;
+  batchIndex?: number;
+  totalBatches?: number;
+}

@@ -1,373 +1,360 @@
-// Durable Object: per-member coordinator (with extensive logging)
-// - Persists run state to Durable Object storage so state survives GC/restarts
-// - Dedupes batches persistently (seenIndices per dungeon)
-// - Maintains runIndex for alarm cleanup
-// - Uses blockConcurrencyWhile for atomic updates when available
-// - Adds verbose logging for debugging
+/**
+ * BatchCoordinator Durable Object (compatible with statsQueueProcessor)
+ *
+ * Purpose:
+ * - Aggregates per-batch results coming from statsQueueProcessor.
+ * - Exports the BatchResult type so processors can import it.
+ * - Keeps internal aggregation small (totalActivities/totalFullClears/totalPlaytimeSeconds/latestActivityDate).
+ *
+ * Endpoints:
+ * - POST /init  { membershipId, membershipType, dungeonHash, totalBatches }
+ * - POST /batch { ...BatchResult }
+ * - GET  /result
+ */
 
 import type { DurableObjectState } from '../types';
 
-type DungeonMeta = {
-  totalBatches: number;
-  received: number;
-  fullClears: number;
-  playtimeSeconds: number;
-  lastActivityDate: string | null;
-  seenIndices: number[]; // small array ok for typical batch counts
-};
+export interface BatchResult {
+  batchIndex: number;
+  activitiesCount: number;
+  fullClearsFound: number;
+  // Added: per-batch playtime and latestActivityDate so DO can aggregate properly
+  playtimeSeconds?: number;
+  latestActivityDate?: string | null;
+}
 
-type RunMeta = {
-  jobId: string; // e.g. member-<id>
-  runId: string;
-  dungeons: Record<string, DungeonMeta>;
+export interface AggregatedResult {
+  totalActivities: number;
+  totalFullClears: number;
+  totalPlaytimeSeconds?: number;
+  latestActivityDate?: string | null;
+}
+
+type Meta = {
+  membershipId: string;
+  membershipType?: number;
+  dungeonHash: string;
+  totalBatches: number;
   createdAt: number;
 };
 
-const RUN_INDEX_KEY = 'runIndex';
-const RUN_KEY_PREFIX = 'run:';
+type AggState = {
+  receivedCount: number;
+  totalActivities: number;
+  totalFullClears: number;
+  totalPlaytimeSeconds: number;
+  latestActivityDate: string | null;
+  seenIndices: number[];
+};
+
+const META_KEY = 'meta';
+const AGG_KEY = 'agg';
+const TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 export class BatchCoordinator {
   private state: DurableObjectState;
-  private alarmTTL = 10 * 60 * 1000; // 10 minutes
-  private idStr: string;
 
   constructor(state: DurableObjectState, _env: any) {
     this.state = state;
-    // try to get a stable id string for logs
-    try {
-      // state.id may be a DurableObjectId with toString()
-      // fallback to JSON if needed
-      // @ts-ignore
-      this.idStr = state.id && state.id.toString ? state.id.toString() : JSON.stringify(state.id);
-    } catch {
-      this.idStr = 'unknown-do-id';
-    }
+    console.log('[BatchCoordinator] Instance created');
   }
 
   private now() {
-    return new Date().toISOString();
-  }
-
-  private log(...args: any[]) {
-    console.log(`[BatchCoordinator:${this.idStr}]`, this.now(), '-', ...args);
-  }
-
-  private warn(...args: any[]) {
-    console.warn(`[BatchCoordinator:${this.idStr}]`, this.now(), '- WARN -', ...args);
-  }
-
-  private error(...args: any[]) {
-    console.error(`[BatchCoordinator:${this.idStr}]`, this.now(), '- ERROR -', ...args);
+    return Date.now();
   }
 
   async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    const path = url.pathname;
-
     try {
-      // POST /init { jobId, runId, dungeonHash, totalBatches }
+      const url = new URL(request.url);
+      const path = url.pathname;
+
+      console.log(`[BatchCoordinator] Request: ${request.method} ${path}`);
+
       if (path === '/init' && request.method === 'POST') {
-        const body = (await request.json()) as any;
-        const jobId = String(body.jobId);
-        const runId = String(body.runId);
-        const dungeonHash = String(body.dungeonHash);
-        const totalBatches = Number(body.totalBatches) || 0;
-        const runKey = `${RUN_KEY_PREFIX}${runId}`;
-
-        this.log('INIT request received', { jobId, runId, dungeonHash, totalBatches });
-
-        await this.state.blockConcurrencyWhile?.(async () => {
-          try {
-            const existing = (await this.state.storage.get(runKey)) as RunMeta | undefined;
-            this.log('INIT: existing run meta (before)', { runKey, existing: existing ? 'present' : 'none' });
-
-            let meta = existing;
-            if (!meta) {
-              meta = { jobId, runId, dungeons: {}, createdAt: Date.now() };
-              this.log('INIT: creating new run meta', { runKey, createdAt: meta.createdAt });
-            } else {
-              // ensure jobId recorded
-              meta.jobId = jobId;
-            }
-
-            if (!meta.dungeons[dungeonHash]) {
-              meta.dungeons[dungeonHash] = {
-                totalBatches,
-                received: 0,
-                fullClears: 0,
-                playtimeSeconds: 0,
-                lastActivityDate: null,
-                seenIndices: [],
-              };
-              this.log('INIT: created dungeon entry', { runKey, dungeonHash, totalBatches });
-            } else {
-              // update totalBatches (support re-init)
-              const prev = meta.dungeons[dungeonHash].totalBatches;
-              meta.dungeons[dungeonHash].totalBatches = totalBatches;
-              this.log('INIT: updated dungeon totalBatches', { runKey, dungeonHash, prev, totalBatches });
-            }
-
-            await this.state.storage.put(runKey, meta);
-            this.log('INIT: persisted run meta', { runKey });
-
-            // maintain runIndex
-            let runIndex = (await this.state.storage.get(RUN_INDEX_KEY)) as Array<{ runId: string; createdAt: number }> | undefined;
-            this.log('INIT: runIndex (before)', { runIndexCount: runIndex ? runIndex.length : 0 });
-            if (!runIndex) runIndex = [];
-            if (!runIndex.find((r) => r.runId === runId)) {
-              runIndex.push({ runId, createdAt: meta.createdAt });
-              await this.state.storage.put(RUN_INDEX_KEY, runIndex);
-              this.log('INIT: added run to runIndex', { runId, runIndexCount: runIndex.length });
-            } else {
-              this.log('INIT: run already present in runIndex', { runId });
-            }
-
-            // refresh alarm
-            const alarmTime = Date.now() + this.alarmTTL;
-            await this.state.storage.setAlarm(alarmTime);
-            this.log('INIT: alarm refreshed until', { alarmTimeISO: new Date(alarmTime).toISOString(), alarmTTLms: this.alarmTTL });
-          } catch (e) {
-            this.error('INIT: error inside blockConcurrencyWhile', e);
-            throw e;
-          }
-        });
-
-        this.log(`INIT completed for run=${runId} dungeon=${dungeonHash} totalBatches=${totalBatches}`);
-        return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
+        return await this.handleInit(request);
+      } else if (path === '/batch' && request.method === 'POST') {
+        return await this.handleBatch(request);
+      } else if (path === '/result' && request.method === 'GET') {
+        return await this.handleResult(request);
+      } else {
+        console.log(`[BatchCoordinator] ❌ 404 Not Found: ${path}`);
+        return new Response('Not Found', { status: 404 });
       }
-
-      // POST /batch { runId, dungeonHash, batchIndex, fullClears, playtimeSeconds, lastActivityDate }
-      if (path === '/batch' && request.method === 'POST') {
-        const body = (await request.json()) as any;
-        const runId = String(body.runId);
-        const dungeonHash = String(body.dungeonHash);
-        const batchIndex = Number(body.batchIndex);
-        const fullClears = Number(body.fullClears || 0);
-        const playtimeSeconds = Number(body.playtimeSeconds || 0);
-        const lastActivityDate = body.lastActivityDate ?? null;
-        const runKey = `${RUN_KEY_PREFIX}${runId}`;
-
-        this.log('BATCH received', { runId, dungeonHash, batchIndex, fullClears, playtimeSeconds, lastActivityDate });
-
-        let accepted = false;
-        await this.state.blockConcurrencyWhile?.(async () => {
-          try {
-            const meta = (await this.state.storage.get(runKey)) as RunMeta | undefined;
-            if (!meta) {
-              this.warn('BATCH: no run meta found for', { runKey });
-              return;
-            }
-            const dungeon = meta.dungeons[dungeonHash];
-            if (!dungeon) {
-              this.warn('BATCH: dungeon not found on run meta', { runKey, dungeonHash });
-              return;
-            }
-
-            // Log current dungeon state before applying
-            this.log('BATCH: current dungeon state (before apply)', {
-              runKey,
-              dungeonHash,
-              totalBatches: dungeon.totalBatches,
-              received: dungeon.received,
-              fullClears: dungeon.fullClears,
-              playtimeSeconds: dungeon.playtimeSeconds,
-              lastActivityDate: dungeon.lastActivityDate,
-              seenIndicesCount: dungeon.seenIndices.length,
-              seenIndicesSample: dungeon.seenIndices.slice(-5),
-            });
-
-            // Dedupe: ignore if seen
-            if (Number.isFinite(batchIndex) && dungeon.seenIndices.includes(batchIndex)) {
-              accepted = true; // duplicate but OK
-              this.log('BATCH: duplicate index ignored', { runKey, dungeonHash, batchIndex });
-              return;
-            }
-
-            // Accept the batch
-            dungeon.seenIndices.push(batchIndex);
-            dungeon.received = (dungeon.received || 0) + 1;
-            dungeon.fullClears = (dungeon.fullClears || 0) + fullClears;
-            dungeon.playtimeSeconds = (dungeon.playtimeSeconds || 0) + playtimeSeconds;
-            if (lastActivityDate && (!dungeon.lastActivityDate || lastActivityDate > dungeon.lastActivityDate)) {
-              const prevLast = dungeon.lastActivityDate;
-              dungeon.lastActivityDate = lastActivityDate;
-              this.log('BATCH: updated lastActivityDate', { runKey, dungeonHash, prevLast, newLast: lastActivityDate });
-            }
-
-            await this.state.storage.put(runKey, meta);
-            this.log('BATCH: persisted updated dungeon meta', { runKey, dungeonHash, received: dungeon.received, totalBatches: dungeon.totalBatches, seenIndicesCount: dungeon.seenIndices.length });
-
-            // refresh alarm
-            const alarmTime = Date.now() + this.alarmTTL;
-            await this.state.storage.setAlarm(alarmTime);
-            this.log('BATCH: alarm refreshed after batch', { alarmTimeISO: new Date(alarmTime).toISOString() });
-
-            accepted = true;
-          } catch (e) {
-            this.error('BATCH: error inside blockConcurrencyWhile', e);
-            throw e;
-          }
-        });
-
-        if (!accepted) {
-          this.warn('BATCH: rejected (unknown run or dungeon)', { runKey });
-          return new Response(JSON.stringify({ error: 'Unknown run or dungeon' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-        }
-
-        this.log('BATCH: accepted', { runId, dungeonHash, batchIndex });
-        return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
-      }
-
-      // GET /result?runId=...&dungeonHash=...
-      if (path === '/result' && request.method === 'GET') {
-        const runId = String(url.searchParams.get('runId') ?? '');
-        const dungeonHash = String(url.searchParams.get('dungeonHash') ?? '');
-        if (!runId || !dungeonHash) {
-          this.warn('RESULT: missing params', { runId, dungeonHash });
-          return new Response(JSON.stringify({ error: 'runId and dungeonHash required' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-        }
-        const runKey = `${RUN_KEY_PREFIX}${runId}`;
-
-        this.log('RESULT: request', { runId, dungeonHash, runKey });
-
-        // Wait loop with periodic logging so callers can see progress in logs
-        const maxWait = 30_000;
-        const start = Date.now();
-        let loopCount = 0;
-        while (true) {
-          loopCount++;
-          try {
-            const meta = (await this.state.storage.get(runKey)) as RunMeta | undefined;
-            if (!meta) {
-              this.warn('RESULT: run not found', { runKey, elapsedMs: Date.now() - start, loopCount });
-              return new Response(JSON.stringify({ error: 'Run not found' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
-            }
-            const dungeon = meta.dungeons[dungeonHash];
-            if (!dungeon) {
-              this.warn('RESULT: dungeon not found for run', { runKey, dungeonHash, elapsedMs: Date.now() - start, loopCount });
-              return new Response(JSON.stringify({ error: 'Dungeon not found for run' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
-            }
-
-            // Log progress periodically (every few loops)
-            if (loopCount === 1 || loopCount % 10 === 0) {
-              this.log('RESULT: polling progress', {
-                runKey,
-                dungeonHash,
-                loopCount,
-                elapsedMs: Date.now() - start,
-                received: dungeon.received,
-                totalBatches: dungeon.totalBatches,
-                seenIndicesCount: dungeon.seenIndices.length,
-                lastActivityDate: dungeon.lastActivityDate,
-              });
-            }
-
-            if (dungeon.received >= dungeon.totalBatches) {
-              const aggregated = {
-                fullClears: dungeon.fullClears,
-                playtimeSeconds: dungeon.playtimeSeconds,
-                lastActivityDate: dungeon.lastActivityDate,
-              };
-
-              this.log('RESULT: all batches received, returning aggregated result', { runKey, dungeonHash, aggregated });
-
-              // Remove dungeon from run meta; if run has no dungeons remove run and update runIndex
-              await this.state.blockConcurrencyWhile?.(async () => {
-                try {
-                  const fresh = (await this.state.storage.get(runKey)) as RunMeta | undefined;
-                  if (!fresh) {
-                    this.warn('RESULT: fresh meta missing unexpectedly', { runKey });
-                    return;
-                  }
-                  delete fresh.dungeons[dungeonHash];
-                  if (Object.keys(fresh.dungeons).length === 0) {
-                    // remove run key
-                    await this.state.storage.delete(runKey);
-                    this.log('RESULT: removed runKey as last dungeon cleared', { runKey });
-
-                    // update runIndex
-                    const runIndex = (await this.state.storage.get(RUN_INDEX_KEY)) as Array<{ runId: string; createdAt: number }> | undefined;
-                    if (runIndex) {
-                      const updated = runIndex.filter((r) => r.runId !== runId);
-                      if (updated.length === 0) {
-                        await this.state.storage.delete(RUN_INDEX_KEY);
-                        this.log('RESULT: runIndex is now empty and deleted');
-                      } else {
-                        await this.state.storage.put(RUN_INDEX_KEY, updated);
-                        this.log('RESULT: updated runIndex', { newCount: updated.length });
-                      }
-                    }
-                  } else {
-                    await this.state.storage.put(runKey, fresh);
-                    this.log('RESULT: updated run meta after removing dungeon', { runKey, remainingDungeons: Object.keys(fresh.dungeons).length });
-                  }
-                } catch (e) {
-                  this.error('RESULT: error in blockConcurrencyWhile cleanup', e);
-                }
-              });
-
-              return new Response(JSON.stringify(aggregated), { headers: { 'Content-Type': 'application/json' } });
-            }
-
-            if (Date.now() - start > maxWait) {
-              this.warn('RESULT: maxWait exceeded, returning timeout response', { runKey, dungeonHash, received: dungeon.received, total: dungeon.totalBatches, elapsedMs: Date.now() - start });
-              return new Response(JSON.stringify({ error: 'Timeout waiting for batches', received: dungeon.received, total: dungeon.totalBatches }), { status: 408, headers: { 'Content-Type': 'application/json' } });
-            }
-
-            // Sleep briefly before next check (small to allow fast completion)
-            await new Promise((r) => setTimeout(r, 100));
-            continue;
-          } catch (err) {
-            this.error('RESULT: error while polling', err);
-            // short backoff before retrying
-            await new Promise((r) => setTimeout(r, 200));
-          }
-        }
-      }
-
-      this.log('FETCH: unknown path', { path });
-      return new Response('Not Found', { status: 404 });
     } catch (err) {
-      this.error('FETCH: top-level error', err);
-      return new Response(JSON.stringify({ error: String(err) }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      console.error('[BatchCoordinator] ❌ Top-level error:', err);
+      return new Response(JSON.stringify({ error: String(err) }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
   }
 
-  // Alarm: cleanup stale runs using the runIndex (no storage.list dependency)
-  async alarm() {
-    try {
-      this.log('ALARM: triggered cleanup');
-      const runIndex = (await this.state.storage.get(RUN_INDEX_KEY)) as Array<{ runId: string; createdAt: number }> | undefined;
-      this.log('ALARM: runIndex read', { runIndexCount: runIndex ? runIndex.length : 0 });
-      if (!runIndex || runIndex.length === 0) {
-        this.log('ALARM: nothing to cleanup');
+  private async handleInit(request: Request): Promise<Response> {
+    console.log(`[BatchCoordinator:Init] Starting initialization`);
+    
+    const body = (await request.json().catch(() => ({} as any))) as any;
+
+    const membershipId = String(body.membershipId ?? '');
+    const membershipType = (typeof body.membershipType !== 'undefined') ? Number(body.membershipType) : undefined;
+    const dungeonHash = String(body.dungeonHash ?? '');
+    const totalBatches = Number(body.totalBatches) || 0;
+
+    console.log(`[BatchCoordinator:Init] - Membership ID: ${membershipId}`);
+    console.log(`[BatchCoordinator:Init] - Membership Type: ${membershipType}`);
+    console.log(`[BatchCoordinator:Init] - Dungeon Hash: ${dungeonHash}`);
+    console.log(`[BatchCoordinator:Init] - Total Batches: ${totalBatches}`);
+
+    if (!membershipId || !dungeonHash || totalBatches <= 0) {
+      console.log(`[BatchCoordinator:Init] ❌ Invalid parameters`);
+      return new Response(JSON.stringify({
+        error: 'Missing or invalid fields. Require membershipId, dungeonHash and totalBatches>0'
+      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    const meta: Meta = {
+      membershipId,
+      membershipType,
+      dungeonHash,
+      totalBatches,
+      createdAt: this.now(),
+    };
+
+    const initialAgg: AggState = {
+      receivedCount: 0,
+      totalActivities: 0,
+      totalFullClears: 0,
+      totalPlaytimeSeconds: 0,
+      latestActivityDate: null,
+      seenIndices: [],
+    };
+
+    await this.state.storage.put(META_KEY, meta);
+    await this.state.storage.put(AGG_KEY, initialAgg);
+    
+    const alarmTime = this.now() + TTL_MS;
+    await this.state.storage.setAlarm(alarmTime);
+
+    console.log(`[BatchCoordinator:Init] ✓ Metadata saved`);
+    console.log(`[BatchCoordinator:Init] ✓ Aggregation state initialized`);
+    console.log(`[BatchCoordinator:Init] ✓ Alarm set for ${new Date(alarmTime).toISOString()}`);
+    console.log(`[BatchCoordinator:Init] ✅ Initialization complete`);
+
+    return new Response(JSON.stringify({ ok: true }), { 
+      status: 200, 
+      headers: { 'Content-Type': 'application/json' } 
+    });
+  }
+
+  private async handleBatch(request: Request): Promise<Response> {
+    console.log(`[BatchCoordinator:Batch] Processing batch result`);
+    
+    const meta = (await this.state.storage.get(META_KEY)) as Meta | undefined;
+    if (!meta) {
+      console.log(`[BatchCoordinator:Batch] ❌ Job not initialized`);
+      return new Response(JSON.stringify({ error: 'Job not initialized' }), { 
+        status: 400, 
+        headers: { 'Content-Type': 'application/json' } 
+      });
+    }
+
+    console.log(`[BatchCoordinator:Batch] Job context:`);
+    console.log(`[BatchCoordinator:Batch] - Membership ID: ${meta.membershipId}`);
+    console.log(`[BatchCoordinator:Batch] - Dungeon Hash: ${meta.dungeonHash}`);
+    console.log(`[BatchCoordinator:Batch] - Total Batches Expected: ${meta.totalBatches}`);
+
+    const payload = (await request.json().catch(() => ({} as any))) as any;
+
+    const batchIndex = Number.isFinite(Number(payload.batchIndex)) ? Number(payload.batchIndex) : null;
+    const activitiesCount = Number.isFinite(Number(payload.activitiesCount)) ? Number(payload.activitiesCount) : 0;
+    const fullClearsFound = Number.isFinite(Number(payload.fullClearsFound ?? payload.fullClears)) ? Number(payload.fullClearsFound ?? payload.fullClears) : 0;
+    const playtimeSeconds = Number.isFinite(Number(payload.playtimeSeconds ?? payload.totalPlaytimeSeconds)) ? Number(payload.playtimeSeconds ?? payload.totalPlaytimeSeconds) : 0;
+    const latestActivityDate = payload.latestActivityDate ?? payload.lastActivityDate ?? null;
+    const dungeonHash = String(payload.dungeonHash ?? meta.dungeonHash);
+
+    console.log(`[BatchCoordinator:Batch] Batch data:`);
+    console.log(`[BatchCoordinator:Batch] - Batch Index: ${batchIndex}`);
+    console.log(`[BatchCoordinator:Batch] - Activities Count: ${activitiesCount}`);
+    console.log(`[BatchCoordinator:Batch] - Full Clears: ${fullClearsFound}`);
+    console.log(`[BatchCoordinator:Batch] - Playtime: ${playtimeSeconds}s`);
+    console.log(`[BatchCoordinator:Batch] - Latest Activity: ${latestActivityDate || 'N/A'}`);
+
+    if (dungeonHash !== meta.dungeonHash) {
+      console.log(`[BatchCoordinator:Batch] ❌ Dungeon hash mismatch: ${dungeonHash} != ${meta.dungeonHash}`);
+      return new Response(JSON.stringify({ error: 'dungeonHash mismatch' }), { 
+        status: 400, 
+        headers: { 'Content-Type': 'application/json' } 
+      });
+    }
+
+    if (batchIndex === null) {
+      console.log(`[BatchCoordinator:Batch] ❌ Missing or invalid batchIndex`);
+      return new Response(JSON.stringify({ error: 'Missing or invalid batchIndex' }), { 
+        status: 400, 
+        headers: { 'Content-Type': 'application/json' } 
+      });
+    }
+
+    // Atomic update
+    console.log(`[BatchCoordinator:Batch] Performing atomic aggregation update...`);
+    
+    await this.state.blockConcurrencyWhile?.(async () => {
+      const stored = (await this.state.storage.get(AGG_KEY)) as AggState | undefined;
+      const agg: AggState = stored ? {
+        receivedCount: stored.receivedCount || 0,
+        totalActivities: stored.totalActivities || 0,
+        totalFullClears: stored.totalFullClears || 0,
+        totalPlaytimeSeconds: stored.totalPlaytimeSeconds || 0,
+        latestActivityDate: stored.latestActivityDate || null,
+        seenIndices: Array.isArray(stored.seenIndices) ? stored.seenIndices.slice() : [],
+      } : {
+        receivedCount: 0,
+        totalActivities: 0,
+        totalFullClears: 0,
+        totalPlaytimeSeconds: 0,
+        latestActivityDate: null,
+        seenIndices: [],
+      };
+
+      // Deduplicate by batchIndex
+      if (agg.seenIndices.includes(batchIndex)) {
+        console.log(`[BatchCoordinator:Batch] ⚠️  Duplicate batch index ${batchIndex} - ignoring`);
+        await this.state.storage.setAlarm(this.now() + TTL_MS);
         return;
       }
-      const now = Date.now();
-      const TTL = this.alarmTTL;
-      const remaining: Array<{ runId: string; createdAt: number }> = [];
-      for (const entry of runIndex) {
-        if (now - (entry.createdAt || 0) > TTL) {
-          try {
-            const key = `${RUN_KEY_PREFIX}${entry.runId}`;
-            await this.state.storage.delete(key);
-            this.log('ALARM: deleted stale run', { runId: entry.runId, key });
-          } catch (e) {
-            this.error('ALARM: error deleting stale run', { runId: entry.runId }, e);
-          }
-        } else {
-          remaining.push(entry);
+
+      console.log(`[BatchCoordinator:Batch] Previous aggregation:`);
+      console.log(`[BatchCoordinator:Batch] - Received: ${agg.receivedCount}`);
+      console.log(`[BatchCoordinator:Batch] - Activities: ${agg.totalActivities}`);
+      console.log(`[BatchCoordinator:Batch] - Full Clears: ${agg.totalFullClears}`);
+      console.log(`[BatchCoordinator:Batch] - Playtime: ${agg.totalPlaytimeSeconds}s`);
+
+      agg.seenIndices.push(batchIndex);
+      agg.receivedCount = (agg.receivedCount || 0) + 1;
+      agg.totalActivities = (agg.totalActivities || 0) + activitiesCount;
+      agg.totalFullClears = (agg.totalFullClears || 0) + fullClearsFound;
+      agg.totalPlaytimeSeconds = (agg.totalPlaytimeSeconds || 0) + playtimeSeconds;
+
+      if (latestActivityDate) {
+        if (!agg.latestActivityDate || latestActivityDate > agg.latestActivityDate) {
+          console.log(`[BatchCoordinator:Batch] Updating latest activity date: ${latestActivityDate}`);
+          agg.latestActivityDate = latestActivityDate;
         }
       }
-      if (remaining.length === 0) {
-        await this.state.storage.delete(RUN_INDEX_KEY);
-        this.log('ALARM: runIndex emptied and deleted');
-      } else {
-        await this.state.storage.put(RUN_INDEX_KEY, remaining);
-        this.log('ALARM: runIndex updated with remaining entries', { remainingCount: remaining.length });
-      }
-    } catch (e) {
-      this.error('ALARM: cleanup error', e);
+
+      await this.state.storage.put(AGG_KEY, agg);
+      await this.state.storage.setAlarm(this.now() + TTL_MS);
+
+      console.log(`[BatchCoordinator:Batch] ✓ Aggregation updated`);
+      console.log(`[BatchCoordinator:Batch] New aggregation:`);
+      console.log(`[BatchCoordinator:Batch] - Received: ${agg.receivedCount}/${meta.totalBatches}`);
+      console.log(`[BatchCoordinator:Batch] - Activities: ${agg.totalActivities}`);
+      console.log(`[BatchCoordinator:Batch] - Full Clears: ${agg.totalFullClears}`);
+      console.log(`[BatchCoordinator:Batch] - Playtime: ${agg.totalPlaytimeSeconds}s (${(agg.totalPlaytimeSeconds / 3600).toFixed(2)}h)`);
+    });
+
+    const updated = (await this.state.storage.get(AGG_KEY)) as AggState;
+    const complete = updated.receivedCount >= meta.totalBatches;
+
+    if (complete) {
+      console.log(`[BatchCoordinator:Batch] 🎉 All batches received! Job complete`);
+      
+      const aggregated = {
+        totalActivities: updated.totalActivities || 0,
+        totalFullClears: updated.totalFullClears || 0,
+        totalPlaytimeSeconds: updated.totalPlaytimeSeconds || 0,
+        latestActivityDate: updated.latestActivityDate || null,
+      };
+
+      console.log(`[BatchCoordinator:Batch] Final aggregation:`);
+      console.log(`[BatchCoordinator:Batch] - Total Activities: ${aggregated.totalActivities}`);
+      console.log(`[BatchCoordinator:Batch] - Total Full Clears: ${aggregated.totalFullClears}`);
+      console.log(`[BatchCoordinator:Batch] - Total Playtime: ${aggregated.totalPlaytimeSeconds}s (${(aggregated.totalPlaytimeSeconds / 3600).toFixed(2)}h)`);
+      console.log(`[BatchCoordinator:Batch] - Latest Activity: ${aggregated.latestActivityDate || 'N/A'}`);
+
+      console.log(`[BatchCoordinator:Batch] Cleaning up storage...`);
+      await this.cleanup();
+      console.log(`[BatchCoordinator:Batch] ✅ Storage cleaned`);
+
+      return new Response(JSON.stringify({ complete: true, aggregated }), { 
+        status: 200, 
+        headers: { 'Content-Type': 'application/json' } 
+      });
     }
+
+    const progress = ((updated.receivedCount / meta.totalBatches) * 100).toFixed(1);
+    console.log(`[BatchCoordinator:Batch] ⏳ Waiting for more batches (${progress}% complete)`);
+
+    return new Response(JSON.stringify({
+      complete: false,
+      batchesReceived: updated.receivedCount || 0,
+      totalBatches: meta.totalBatches,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+
+  private async handleResult(request: Request): Promise<Response> {
+    console.log(`[BatchCoordinator:Result] Fetching result`);
+    
+    const meta = (await this.state.storage.get(META_KEY)) as Meta | undefined;
+    const agg = (await this.state.storage.get(AGG_KEY)) as AggState | undefined;
+
+    if (!meta || !agg) {
+      console.log(`[BatchCoordinator:Result] ❌ Job not initialized`);
+      return new Response(JSON.stringify({ error: 'Job not initialized' }), { 
+        status: 404, 
+        headers: { 'Content-Type': 'application/json' } 
+      });
+    }
+
+    const complete = agg.receivedCount >= meta.totalBatches;
+
+    console.log(`[BatchCoordinator:Result] Job status:`);
+    console.log(`[BatchCoordinator:Result] - Complete: ${complete}`);
+    console.log(`[BatchCoordinator:Result] - Progress: ${agg.receivedCount}/${meta.totalBatches}`);
+
+    if (!complete) {
+      console.log(`[BatchCoordinator:Result] ⏳ Job incomplete - timeout`);
+      return new Response(JSON.stringify({
+        error: 'Timeout waiting for batches',
+        received: agg.receivedCount || 0,
+        total: meta.totalBatches,
+      }), { status: 408, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    const aggregated = {
+      totalActivities: agg.totalActivities || 0,
+      totalFullClears: agg.totalFullClears || 0,
+      totalPlaytimeSeconds: agg.totalPlaytimeSeconds || 0,
+      latestActivityDate: agg.latestActivityDate || null,
+    };
+
+    console.log(`[BatchCoordinator:Result] ✓ Returning final aggregation`);
+    console.log(`[BatchCoordinator:Result] - Activities: ${aggregated.totalActivities}`);
+    console.log(`[BatchCoordinator:Result] - Full Clears: ${aggregated.totalFullClears}`);
+    console.log(`[BatchCoordinator:Result] - Playtime: ${aggregated.totalPlaytimeSeconds}s`);
+
+    await this.cleanup();
+    console.log(`[BatchCoordinator:Result] ✓ Storage cleaned`);
+
+    return new Response(JSON.stringify(aggregated), { 
+      status: 200, 
+      headers: { 'Content-Type': 'application/json' } 
+    });
+  }
+
+  private async cleanup(): Promise<void> {
+    try {
+      console.log(`[BatchCoordinator:Cleanup] Starting cleanup`);
+      await this.state.storage.delete(META_KEY);
+      await this.state.storage.delete(AGG_KEY);
+      console.log(`[BatchCoordinator:Cleanup] ✓ Deleted meta and aggregation keys`);
+    } catch (err) {
+      console.warn(`[BatchCoordinator:Cleanup] ⚠️  Cleanup error:`, err);
+    }
+  }
+
+  async alarm(): Promise<void> {
+    console.log('[BatchCoordinator:Alarm] Alarm triggered - cleaning up stale job');
+    await this.cleanup();
+    console.log('[BatchCoordinator:Alarm] ✓ Cleanup complete');
   }
 }

@@ -64,6 +64,35 @@ async function fetchWithRetry(
   throw lastError || new Error('Fetch failed after retries');
 }
 
+/**
+ * withRateLimit: small helper to wrap any async call with retry/backoff behavior.
+ * - fn: a zero-arg async function returning T
+ * - maxRetries: number of retries
+ *
+ * This is intentionally generic so callers (like processors) can wrap per-page
+ * or per-call actions and get consistent backoff behavior.
+ */
+export async function withRateLimit<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      attempt++;
+      // If we've exhausted retries, rethrow
+      if (attempt > maxRetries) {
+        throw err;
+      }
+      // If the error looks like an AbortError, let's rethrow immediately
+      if (err && typeof err === 'object' && 'name' in err && (err as any).name === 'AbortError') {
+        throw err;
+      }
+      const wait = Math.pow(2, attempt) * 200 + Math.random() * 100;
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
 /** --- API helpers below: unchanged behavior but use fetchWithRetry --- */
 
 export async function fetchClanRoster(clanId: string, apiKey: string) {

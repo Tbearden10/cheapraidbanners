@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS clan_members (
   emblem_path TEXT,
   emblem_background_path TEXT,
   is_active INTEGER NOT NULL DEFAULT 1,
+  -- New column used by smart sync logic to track unchanged online count
+  unchanged_online_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
   UNIQUE(clan_id, membership_id)
