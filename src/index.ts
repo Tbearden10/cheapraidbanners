@@ -1,7 +1,7 @@
 // ============================================================================
 // FILE: src/index.ts
 // Main worker entry point - handles HTTP routes and cron triggers
-// Updated with extensive logging
+// Logging reduced to key events only
 // ============================================================================
 
 import type { Env, MemberJob, StatsQueueJob } from './types';
@@ -16,7 +16,8 @@ import {
 import { getMembersList, upsertClanMember } from './db/queries';
 import { processMemberJob } from './processors/memberJobProcessor';
 import { processStatsQueueJob } from './processors/statsQueueProcessor';
-export { BatchCoordinator } from './durable-objects/BatchCoordinator';
+
+// Export Durable Objects
 export { RunTracker } from './durable-objects/RunTracker';
 
 // CORS Configuration
@@ -111,107 +112,70 @@ export async function memberSyncCron(env: Env): Promise<void> {
   const startTime = Date.now();
   const clanId = env.BUNGIE_CLAN_ID;
   
-  console.log(`\n${'═'.repeat(80)}`);
-  console.log(`[MemberSync] STARTING Member Roster Sync`);
-  console.log(`[MemberSync] Clan ID: ${clanId}`);
-  console.log(`[MemberSync] Timestamp: ${new Date().toISOString()}`);
-  console.log(`${'═'.repeat(80)}`);
+  console.log(`[MemberSync] START: clan=${clanId} at ${new Date().toISOString()}`);
 
   // Fetch current roster from Bungie
-  console.log(`[MemberSync] Step 1: Fetching current clan roster from Bungie API...`);
   const roster = (await fetchClanRoster(clanId, env.BUNGIE_API_KEY)) || [];
-  console.log(`[MemberSync] ✓ Fetched ${roster.length} members from Bungie`);
+  console.info(`[MemberSync] Fetched roster: ${roster.length} members`);
 
-  console.log(`[MemberSync] Step 2: Fetching existing members from database...`);
   const dbMembers = await getMembersList(env.DB, clanId, false);
-  console.log(`[MemberSync] ✓ Found ${dbMembers.length} members in database (including inactive)`);
+  console.info(`[MemberSync] DB members: ${dbMembers.length} (incl. inactive)`);
 
   const dbMemberIds = new Set(dbMembers.map(m => m.membership_id));
   const rosterMemberIds = new Set((roster || []).map((m: any) => m.membershipId));
 
-  // Detect changes
   const newMembers = roster.filter((m: any) => !dbMemberIds.has(m.membershipId));
   const leftMembers = dbMembers.filter(m => !rosterMemberIds.has(m.membership_id));
   const existingMembers = roster.filter((m: any) => dbMemberIds.has(m.membershipId));
 
-  console.log(`\n[MemberSync] Step 3: Change Detection Summary:`);
-  console.log(`[MemberSync] - New members joined: ${newMembers.length}`);
-  console.log(`[MemberSync] - Members left: ${leftMembers.length}`);
-  console.log(`[MemberSync] - Existing members to update: ${existingMembers.length}`);
-
-  if (newMembers.length > 0) {
-    console.log(`[MemberSync] New members:`);
-    newMembers.forEach((m: any) => {
-      const displayName = m.bungieGlobalDisplayNameCode
-        ? `${m.bungieGlobalDisplayName}#${m.bungieGlobalDisplayNameCode}`
-        : m.bungieGlobalDisplayName || m.displayName;
-      console.log(`[MemberSync]   + ${displayName} (${m.membershipId})`);
-    });
-  }
-
-  if (leftMembers.length > 0) {
-    console.log(`[MemberSync] Members who left:`);
-    leftMembers.forEach(m => {
-      console.log(`[MemberSync]   - ${m.display_name} (${m.membership_id})`);
-    });
-  }
+  console.info(`[MemberSync] Changes: new=${newMembers.length}, left=${leftMembers.length}, existing=${existingMembers.length}`);
 
   // Process all roster members (new + existing)
-  console.log(`\n[MemberSync] Step 4: Processing ${roster.length} roster members...`);
   let successCount = 0;
   let errorCount = 0;
 
   for (let i = 0; i < roster.length; i++) {
     const rawMember = roster[i];
     const member = { ...rawMember };
-    const memberNum = i + 1;
-
     const displayName = member.bungieGlobalDisplayNameCode
       ? `${member.bungieGlobalDisplayName}#${member.bungieGlobalDisplayNameCode}`
       : member.bungieGlobalDisplayName || member.displayName;
 
-    console.log(`[MemberSync]   Processing ${memberNum}/${roster.length}: ${displayName}...`);
-
     try {
-      console.log(`[MemberSync]     - Enriching with emblem data...`);
-      const enriched = await enrichMemberWithEmblem(member, env.BUNGIE_API_KEY);
-      member.emblemPath = enriched.emblemPath ?? null;
-      member.emblemBackgroundPath = enriched.emblemBackgroundPath ?? null;
-      Object.assign(member, enriched);
-      console.log(`[MemberSync]     - ✓ Emblem enriched`);
-    } catch (err) {
-      console.warn(`[MemberSync]     - ⚠️  Emblem enrich failed:`, err);
-      member.emblemPath = null;
-      member.emblemBackgroundPath = null;
-    }
+      // Enrich emblem (best-effort) — suppress per-member debug
+      try {
+        const enriched = await enrichMemberWithEmblem(member, env.BUNGIE_API_KEY);
+        Object.assign(member, enriched);
+      } catch {
+        member.emblemPath = null;
+        member.emblemBackgroundPath = null;
+      }
 
-    try {
-      console.log(`[MemberSync]     - Upserting to database...`);
-      await upsertClanMember(env.DB, {
-        clanId,
-        membershipId: member.membershipId,
-        membershipType: member.membershipType,
-        displayName,
-        isOnline: member.isOnline || false,
-        lastOnlineStatusChange: member.lastOnlineStatusChange,
-        joinDate: member.joinDate,
-        isActive: true,
-        emblemPath: member.emblemPath ?? null,
-        emblemBackgroundPath: member.emblemBackgroundPath ?? null,
-      });
-      console.log(`[MemberSync]     - ✓ Database updated`);
-      successCount++;
+      // Upsert member into DB
+      try {
+        await upsertClanMember(env.DB, {
+          clanId,
+          membershipId: member.membershipId,
+          membershipType: member.membershipType,
+          displayName,
+          isOnline: member.isOnline || false,
+          lastOnlineStatusChange: member.lastOnlineStatusChange,
+          joinDate: member.joinDate,
+          isActive: true,
+          emblemPath: member.emblemPath ?? null,
+          emblemBackgroundPath: member.emblemBackgroundPath ?? null,
+        });
+        successCount++;
+      } catch (err) {
+        errorCount++;
+      }
     } catch (err) {
-      console.error(`[MemberSync]     - ❌ Database upsert failed:`, err);
       errorCount++;
     }
   }
 
-  console.log(`[MemberSync] ✓ Member processing complete: ${successCount} success, ${errorCount} errors`);
-
   // Mark left members as inactive
   if (leftMembers.length > 0) {
-    console.log(`\n[MemberSync] Step 5: Marking ${leftMembers.length} departed members as inactive...`);
     let inactiveSuccessCount = 0;
     let inactiveErrorCount = 0;
 
@@ -220,155 +184,133 @@ export async function memberSyncCron(env: Env): Promise<void> {
         await env.DB.prepare(
           `UPDATE clan_members SET is_active = 0, updated_at = ? WHERE clan_id = ? AND membership_id = ?`
         ).bind(Date.now(), clanId, left.membership_id).run();
-        console.log(`[MemberSync]   - ✓ Marked ${left.display_name} as inactive`);
         inactiveSuccessCount++;
       } catch (err) {
-        console.error(`[MemberSync]   - ❌ Failed to mark ${left.display_name} inactive:`, err);
         inactiveErrorCount++;
       }
     }
-    console.log(`[MemberSync] ✓ Inactive marking complete: ${inactiveSuccessCount} success, ${inactiveErrorCount} errors`);
+    console.info(`[MemberSync] Marked ${inactiveSuccessCount}/${leftMembers.length} departed members inactive`);
   }
 
   const duration = Date.now() - startTime;
-  console.log(`\n${'═'.repeat(80)}`);
-  console.log(`[MemberSync] COMPLETE`);
-  console.log(`[MemberSync] Summary:`);
-  console.log(`[MemberSync] - Total roster members: ${roster.length}`);
-  console.log(`[MemberSync] - New members: ${newMembers.length}`);
-  console.log(`[MemberSync] - Members left: ${leftMembers.length}`);
-  console.log(`[MemberSync] - Successfully processed: ${successCount}`);
-  console.log(`[MemberSync] - Errors: ${errorCount}`);
-  console.log(`[MemberSync] - Duration: ${duration}ms (${(duration / 1000).toFixed(2)}s)`);
-  console.log(`${'═'.repeat(80)}\n`);
+  console.log(`[MemberSync] COMPLETE: processed=${successCount} errors=${errorCount} durationMs=${duration}`);
 }
 
 // ============================================================================
 // STATS SYNC CRON - Every 6 hours
 // ============================================================================
-async function statsSyncCron(env: Env): Promise<void> {
+
+function shouldProcessMemberWithDb(member: any, dbLastProcessedDate: string | null): boolean {
+  if (member.is_online) return true;
+
+  const isEmpty = (v: unknown) =>
+    v === null || v === undefined || (typeof v === 'string' && v.trim && v.trim() === '');
+
+  const currResolved = (member as any).last_online_status_change_resolved ?? null;
+  const currRaw = (member as any).last_online_status_change ?? null;
+
+  if (isEmpty(currResolved) && isEmpty(currRaw) && isEmpty(dbLastProcessedDate)) return false;
+
+  if (!isEmpty(currResolved) && !isEmpty(currResolved) && !isEmpty(dbLastProcessedDate)) {
+    const lastOnlineMs = Number(currResolved);
+    const lastProcessedMs = Number(new Date(dbLastProcessedDate).getTime());
+    if (!Number.isNaN(lastOnlineMs) && !Number.isNaN(lastProcessedMs)) {
+      return lastOnlineMs > lastProcessedMs;
+    }
+  }
+
+  let lastProcessedMs: number | null = null;
+  if (!isEmpty(dbLastProcessedDate)) {
+    const parsed = new Date(String(dbLastProcessedDate)).getTime();
+    if (!Number.isNaN(parsed)) lastProcessedMs = parsed;
+  }
+
+  let latestOnlineMs: number | null = null;
+  const candidate = currResolved ?? currRaw ?? null;
+  if (!isEmpty(candidate)) {
+    const asNum = Number(candidate);
+    if (Number.isFinite(asNum) && asNum > 0) {
+      latestOnlineMs = asNum;
+    } else {
+      const parsed = new Date(String(candidate)).getTime();
+      if (!Number.isNaN(parsed)) latestOnlineMs = parsed;
+    }
+  }
+
+  if (lastProcessedMs && latestOnlineMs) {
+    return lastProcessedMs < latestOnlineMs;
+  }
+
+  return true;
+}
+
+async function statsSyncCron(env: Env, options?: { force?: boolean }): Promise<void> {
+  const force = !!options?.force;
   const startTime = Date.now();
   const clanId = env.BUNGIE_CLAN_ID;
   
-  console.log(`\n${'═'.repeat(80)}`);
-  console.log(`[StatsSync] STARTING Stats Sync`);
-  console.log(`[StatsSync] Clan ID: ${clanId}`);
-  console.log(`[StatsSync] Timestamp: ${new Date().toISOString()}`);
-  console.log(`${'═'.repeat(80)}`);
+  console.log(`[StatsSync] START: clan=${clanId} force=${force} at ${new Date().toISOString()}`);
 
-  console.log(`[StatsSync] Step 1: Fetching active members from database...`);
   const members = await getMembersList(env.DB, clanId, true);
-
   if (!members || members.length === 0) {
-    console.log(`[StatsSync] ⚠️  No active members found - exiting`);
-    console.log(`${'═'.repeat(80)}\n`);
+    console.info('[StatsSync] No active members - exiting');
     return;
   }
+  console.info(`[StatsSync] Active members found: ${members.length}`);
 
-  console.log(`[StatsSync] ✓ Found ${members.length} active members`);
-
-  // Step 2: Use last-online status change as a fast pre-check to avoid fetching activity history.
-  // - If member is currently online -> always process (their last-online won't update until they go offline).
-  // - If last-online is null/empty -> exclude (skip) as requested.
-  // - Otherwise compare resolved or raw last-online fields vs their previous values to decide skip/process.
-  console.log(`[StatsSync] Step 2: Filtering members by last-online/resume checkpoints (including online members)...`);
-
+  // Decide which members to process (keep concise logs)
   const membersToProcess: typeof members = [];
 
-  const isEmpty = (v: unknown) => v === null || v === undefined || (typeof v === 'string' && v.trim() === '');
-
   for (const member of members) {
-    const displayName = member.display_name || member.display_name || String(member.membership_id);
+    try {
+      if (force) {
+        membersToProcess.push(member);
+        continue;
+      }
 
-    // 0) If member is currently online, we want to process them (their last-online won't move until they go offline).
-    if (member.is_online) {
-      console.log(`[StatsSync]   - ${displayName}: Currently online -> will process`);
+      const dbSummary = await env.DB.prepare(`
+        SELECT 
+          MAX(last_processed_date) AS last_processed_date,
+          SUM(COALESCE(total_clears, 0)) AS sum_total_clears,
+          SUM(COALESCE(total_full_clears, 0)) AS sum_total_full_clears
+        FROM member_dungeon_stats
+        WHERE clan_id = ? AND membership_id = ?
+      `).bind(clanId, member.membership_id).first();
+
+      const dbLastProcessed = dbSummary ? (dbSummary as any).last_processed_date ?? null : null;
+      const sumTotalClears = dbSummary ? Number((dbSummary as any).sum_total_clears ?? 0) : 0;
+      const sumTotalFullClears = dbSummary ? Number((dbSummary as any).sum_total_full_clears ?? 0) : 0;
+
+      const isNewMember = !dbLastProcessed && sumTotalClears === 0 && sumTotalFullClears === 0;
+
+      const prevLastOnline = (member as any).last_online_status_change_prev ?? null;
+      const currLastOnline = (member as any).last_online_status_change ?? null;
+      const lastOnlineChanged = prevLastOnline && currLastOnline && String(prevLastOnline) !== String(currLastOnline);
+
+      const shouldProcessFlag =
+        Boolean(member.is_online) ||
+        isNewMember ||
+        Boolean(lastOnlineChanged) ||
+        shouldProcessMemberWithDb(member, dbLastProcessed);
+
+      if (shouldProcessFlag) {
+        membersToProcess.push(member);
+      }
+    } catch (err) {
+      // If decision fails, default to processing
       membersToProcess.push(member);
-      continue;
     }
-
-    // 1) If the current last-online is empty/null, exclude them per your request
-    const currResolved = (member as any).last_online_status_change_resolved ?? null;
-    const currRaw = (member as any).last_online_status_change ?? null;
-    if (isEmpty(currResolved) && isEmpty(currRaw)) {
-      console.log(`[StatsSync]   - ${displayName}: Current last-online is empty/null -> skipping`);
-      continue;
-    }
-
-    // 2) If both resolved values (current + prev) are present, prefer them
-    const prevResolved = (member as any).last_online_status_change_resolved_prev ?? null;
-    const hasPrevResolved = !isEmpty(prevResolved) && !isEmpty(currResolved);
-    if (hasPrevResolved) {
-      if (String(currResolved) === String(prevResolved)) {
-        console.log(`[StatsSync]   - ${displayName}: Skipping (resolved last-online unchanged)`);
-        continue;
-      } else {
-        console.log(`[StatsSync]   - ${displayName}: Resolved last-online changed -> will process`);
-        membersToProcess.push(member);
-        continue;
-      }
-    }
-
-    // 3) Fallback to raw fields (current + prev)
-    const prevRaw = (member as any).last_online_status_change_prev ?? null;
-    const hasPrevRaw = !isEmpty(prevRaw) && !isEmpty(currRaw);
-    if (hasPrevRaw) {
-      if (String(currRaw) === String(prevRaw)) {
-        console.log(`[StatsSync]   - ${displayName}: Skipping (raw last-online unchanged)`);
-        continue;
-      } else {
-        console.log(`[StatsSync]   - ${displayName}: Raw last-online changed -> will process`);
-        membersToProcess.push(member);
-        continue;
-      }
-    }
-
-    // 4) If we don't have prev last-online values, fall back to last_processed_date vs latest known last-online:
-    const lastProcessedStr = member.last_processed_date ?? null;
-    let lastProcessedMs: number | null = null;
-    if (lastProcessedStr) {
-      const parsed = new Date(lastProcessedStr).getTime();
-      if (!Number.isNaN(parsed)) lastProcessedMs = parsed;
-    }
-
-    // derive latestOnlineMs from current resolved/raw if possible
-    let latestOnlineMs: number | null = null;
-    const candidate = currResolved ?? currRaw ?? null;
-    if (!isEmpty(candidate)) {
-      const asNum = Number(candidate);
-      if (Number.isFinite(asNum) && asNum > 0) {
-        latestOnlineMs = asNum;
-      } else {
-        const parsed = new Date(String(candidate)).getTime();
-        if (!Number.isNaN(parsed)) latestOnlineMs = parsed;
-      }
-    }
-
-    if (lastProcessedMs && latestOnlineMs && lastProcessedMs >= latestOnlineMs) {
-      console.log(`[StatsSync]   - ${displayName}: Skipping (last_processed_date ${new Date(lastProcessedMs).toISOString()} >= latest online ${new Date(latestOnlineMs).toISOString()})`);
-      continue;
-    }
-
-    // Default: process (no prev snapshot available or detected change)
-    console.log(`[StatsSync]   - ${displayName}: No prev-last-online snapshot or detected change -> will process`);
-    membersToProcess.push(member);
   }
 
-  console.log(`\n[StatsSync] Activity Filter Results:`);
-  console.log(`[StatsSync] - Total active members: ${members.length}`);
-  console.log(`[StatsSync] - Members with detected new activity: ${membersToProcess.length}`);
-  console.log(`[StatsSync] - Members skipped: ${members.length - membersToProcess.length}`);
+  console.info(`[StatsSync] Members queued for processing: ${membersToProcess.length}/${members.length}`);
 
   if (membersToProcess.length === 0) {
-    console.log(`[StatsSync] ✓ Nothing to process - exiting`);
-    console.log(`${'═'.repeat(80)}\n`);
+    console.info('[StatsSync] Nothing to process - exiting');
     return;
   }
 
   const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  console.log(`\n[StatsSync] Step 3: Initializing run tracker`);
-  console.log(`[StatsSync] Run ID: ${runId}`);
-  console.log(`[StatsSync] Expected member count: ${membersToProcess.length}`);
+  console.info(`[StatsSync] Run initialized: runId=${runId} expectedCount=${membersToProcess.length}`);
 
   try {
     const trackerId = env.RUN_TRACKER.idFromName(`run-tracker-${clanId}`);
@@ -382,49 +324,46 @@ async function statsSyncCron(env: Env): Promise<void> {
       }),
       headers: { 'Content-Type': 'application/json' },
     });
-    console.log(`[StatsSync] ✓ RunTracker initialized`);
+    console.debug('[StatsSync] RunTracker initialized');
   } catch (err) {
-    console.error(`[StatsSync] ⚠️  RunTracker init failed (continuing anyway):`, err);
+    console.warn('[StatsSync] RunTracker init failed (continuing):', String(err));
   }
 
   // Queue members SEQUENTIALLY — pass last_processed_date from DB so MemberJob will only process newer instances.
-  console.log(`\n[StatsSync] Step 4: Queueing ${membersToProcess.length} members...`);
   let queuedCount = 0;
   let queueErrorCount = 0;
 
   for (let i = 0; i < membersToProcess.length; i++) {
     const member = membersToProcess[i];
-    const memberNum = i + 1;
-    
-    console.log(`[StatsSync]   Queueing ${memberNum}/${membersToProcess.length}: ${member.display_name}...`);
-    
+
     try {
+      const prevRow = await env.DB.prepare(`
+        SELECT MAX(last_processed_date) AS last_processed_date
+        FROM member_dungeon_stats
+        WHERE clan_id = ? AND membership_id = ?
+      `).bind(clanId, member.membership_id).first();
+
+      const lastProcessedDate = (prevRow ? (prevRow as any).last_processed_date ?? null : null);
+
       await env.MEMBER_STATS_QUEUE.send({
         clanId,
         membershipId: member.membership_id,
         membershipType: member.membership_type,
         displayName: member.display_name,
-        lastProcessedDate: member.last_processed_date ?? null,
+        lastProcessedDate,
         runId,
       });
-      console.log(`[StatsSync]   ✓ Queued ${member.display_name}`);
       queuedCount++;
+      if (queuedCount % 50 === 0) {
+        console.info(`[StatsSync] Queued ${queuedCount}/${membersToProcess.length} members so far`);
+      }
     } catch (err) {
-      console.error(`[StatsSync]   ❌ Failed to queue ${member.display_name}:`, err);
       queueErrorCount++;
     }
   }
 
-  const duration = Date.now() - startTime;
-  console.log(`\n${'═'.repeat(80)}`);
-  console.log(`[StatsSync] COMPLETE`);
-  console.log(`[StatsSync] Summary:`);
-  console.log(`[StatsSync] - Run ID: ${runId}`);
-  console.log(`[StatsSync] - Members queued: ${queuedCount}`);
-  console.log(`[StatsSync] - Queue errors: ${queueErrorCount}`);
-  console.log(`[StatsSync] - Duration: ${duration}ms (${(duration / 1000).toFixed(2)}s)`);
-  console.log(`[StatsSync] Note: Member processing will happen asynchronously via queue`);
-  console.log(`${'═'.repeat(80)}\n`);
+  const duration2 = Date.now() - startTime;
+  console.log(`[StatsSync] COMPLETE: queued=${queuedCount} queueErrors=${queueErrorCount} durationMs=${duration2}`);
 }
 
 /** Helper: fetch all member stats grouped (used by /stats) */
@@ -464,7 +403,6 @@ export default {
 
     // CORS preflight
     if (request.method === 'OPTIONS') {
-      console.log(`[HTTP:${requestId}] CORS preflight - responding with headers`);
       return new Response(null, { 
         status: 204, 
         headers: { ...getCorsHeaders(request, env), ...getSecurityHeaders() }
@@ -476,7 +414,6 @@ export default {
       if (env.ENVIRONMENT !== 'dev' && env.ENVIRONMENT !== 'development') {
         const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
         if (!checkRateLimit(clientIP, 100, 60000)) {
-          console.log(`[HTTP:${requestId}] ❌ Rate limit exceeded for IP: ${clientIP}`);
           return jsonResponse({ error: 'Rate limit exceeded' }, 429, request, env);
         }
       }
@@ -487,35 +424,22 @@ export default {
       // Auth check for protected endpoints
       if (!(request.method === 'GET' && publicGetPaths.has(url.pathname))) {
         if (!isAuthenticated(request, env)) {
-          console.log(`[HTTP:${requestId}] ❌ Unauthorized request`);
           return jsonResponse({ error: 'Unauthorized' }, 401, request, env);
         }
-        console.log(`[HTTP:${requestId}] ✓ Authenticated`);
-      } else {
-        console.log(`[HTTP:${requestId}] Public endpoint - no auth required`);
       }
 
       // GET /members
       if (url.pathname === '/members' && request.method === 'GET') {
         const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
-        console.log(`[HTTP:${requestId}] Fetching members for clan: ${clanId}`);
-        
         const members = await getMembersList(env.DB, clanId, true);
-        console.log(`[HTTP:${requestId}] ✓ Found ${members.length} active members`);
-        
         return jsonResponse({ members }, 200, request, env);
       }
 
       // GET /stats
       if (url.pathname === '/stats' && request.method === 'GET') {
         const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
-        console.log(`[HTTP:${requestId}] Fetching stats for clan: ${clanId}`);
-        
         const members = await getMembersList(env.DB, clanId, true);
-        console.log(`[HTTP:${requestId}] - Fetched ${members.length} members`);
-        
         const statsByMember = await fetchAllMemberStatsGrouped(env.DB, clanId);
-        console.log(`[HTTP:${requestId}] - Fetched stats for ${statsByMember.size} members`);
 
         const membersWithStats = members.map((member) => ({
           destinyUserInfo: {
@@ -528,13 +452,11 @@ export default {
           lastOnlineStatusChangeResolved: (member as any).last_online_status_change_resolved ?? null,
           emblemPath: member.emblem_path ?? null,
           emblemBackgroundPath: member.emblem_background_path ?? null,
-          stats: statsByMember.get(member.membership_id) || [],
+          stats: statsByMember.get(String(member.membership_id)) || [],
           lastProcessedDate: member.last_processed_date ?? null,
         }));
 
         const aggregateStats = await env.DB.prepare(`SELECT * FROM clan_aggregate_stats WHERE clan_id = ? ORDER BY dungeon_hash`).bind(clanId).all();
-        console.log(`[HTTP:${requestId}] - Fetched ${(aggregateStats.results || []).length} aggregate stats`);
-        console.log(`[HTTP:${requestId}] ✓ Returning complete stats payload`);
 
         return jsonResponse({
           members: membersWithStats,
@@ -553,15 +475,11 @@ export default {
         const count = url.searchParams.get('count') || '10';
         const page = url.searchParams.get('page') || '0';
 
-        console.log(`[HTTP:${requestId}] Params: type=${membershipType}, id=${membershipId}, char=${characterId}, mode=${mode}, count=${count}, page=${page}`);
-
         if (!membershipType || !membershipId || !characterId) {
-          console.log(`[HTTP:${requestId}] ❌ Missing required parameters`);
           return jsonResponse({ error: 'Missing required params: membershipType, membershipId, characterId' }, 400, request, env);
         }
 
         try {
-          console.log(`[HTTP:${requestId}] Fetching activities from Bungie API...`);
           const activities = await fetchActivitiesForCharacter(
             Number(membershipType),
             membershipId,
@@ -571,10 +489,9 @@ export default {
             Number(count),
             env.BUNGIE_API_KEY
           );
-          console.log(`[HTTP:${requestId}] ✓ Fetched ${activities?.length || 0} activities`);
           return jsonResponse(activities, 200, request, env);
         } catch (err) {
-          console.error(`[HTTP:${requestId}] ❌ Error:`, err);
+          console.error(`[HTTP:${requestId}] ❌ Error fetching activity history:`, err);
           return jsonResponse({ error: 'Failed to fetch activity history' }, 500, request, env);
         }
       }
@@ -586,16 +503,11 @@ export default {
         const ACTIVITIES_PER_MEMBER = 1;
         const TOTAL_ACTIVITIES = 3;
 
-        console.log(`[HTTP:${requestId}] Fetching recent activities for clan: ${clanId}`);
-
         try {
           const roster = await fetchClanRoster(clanId, env.BUNGIE_API_KEY);
           if (!roster || roster.length === 0) {
-            console.log(`[HTTP:${requestId}] ⚠️  No roster members found`);
             return jsonResponse([], 200, request, env);
           }
-
-          console.log(`[HTTP:${requestId}] - Fetched ${roster.length} roster members`);
 
           const sorted = roster
             .filter((m: any) => m.membershipId && m.membershipType)
@@ -606,14 +518,10 @@ export default {
             })
             .slice(0, MEMBERS_TO_CHECK);
 
-          console.log(`[HTTP:${requestId}] - Checking ${sorted.length} most recently active members`);
-
           const allActivities: any[] = [];
           
           for (let i = 0; i < sorted.length; i++) {
             const member = sorted[i];
-            console.log(`[HTTP:${requestId}]   Member ${i + 1}/${sorted.length}: ${member.displayName}`);
-            
             try {
               const characters = await fetchCharactersForMember(
                 member.membershipId,
@@ -621,12 +529,7 @@ export default {
                 env.BUNGIE_API_KEY
               );
               
-              if (!characters || characters.length === 0) {
-                console.log(`[HTTP:${requestId}]     - No characters found`);
-                continue;
-              }
-              
-              console.log(`[HTTP:${requestId}]     - Found ${characters.length} character(s)`);
+              if (!characters || characters.length === 0) continue;
               
               const activities = await fetchActivitiesForCharacter(
                 member.membershipType,
@@ -638,12 +541,7 @@ export default {
                 env.BUNGIE_API_KEY
               );
               
-              if (!activities || activities.length === 0) {
-                console.log(`[HTTP:${requestId}]     - No activities found`);
-                continue;
-              }
-              
-              console.log(`[HTTP:${requestId}]     - ✓ Found ${activities.length} activity/activities`);
+              if (!activities || activities.length === 0) continue;
               
               for (const act of activities) {
                 allActivities.push({
@@ -653,42 +551,31 @@ export default {
                   membershipType: member.membershipType,
                 });
               }
-            } catch (err) {
-              console.warn(`[HTTP:${requestId}]     - ❌ Failed:`, err);
+            } catch {
               continue;
             }
           }
-
-          console.log(`[HTTP:${requestId}] - Collected ${allActivities.length} total activities`);
 
           const sorted_activities = allActivities
             .filter(a => a.period)
             .sort((a, b) => new Date(b.period).getTime() - new Date(a.period).getTime())
             .slice(0, TOTAL_ACTIVITIES);
 
-          console.log(`[HTTP:${requestId}] - Selected ${sorted_activities.length} most recent activities`);
-
           const activityDefCache = new Map<string, any>();
           
-          console.log(`[HTTP:${requestId}] - Enriching with activity definitions...`);
           const enrichedActivities = await Promise.all(
-            sorted_activities.map(async (act, idx) => {
+            sorted_activities.map(async (act) => {
               try {
                 const activityHash = act.activityDetails?.directorActivityHash || act.activityDetails?.referenceId;
-                
                 if (!activityHash) return act;
 
                 let activityDef = activityDefCache.get(String(activityHash));
-                
                 if (!activityDef) {
                   activityDef = await fetchActivityDefinition(String(activityHash), env.BUNGIE_API_KEY);
-                  if (activityDef) {
-                    activityDefCache.set(String(activityHash), activityDef);
-                  }
+                  if (activityDef) activityDefCache.set(String(activityHash), activityDef);
                 }
 
                 if (activityDef?.pgcrImage) {
-                  console.log(`[HTTP:${requestId}]     Activity ${idx + 1}: ✓ Enriched with ${activityDef.displayProperties?.name}`);
                   return {
                     ...act,
                     activityDetails: {
@@ -700,17 +587,15 @@ export default {
                 }
 
                 return act;
-              } catch (err) {
-                console.warn(`[HTTP:${requestId}]     Activity ${idx + 1}: Failed to enrich:`, err);
+              } catch {
                 return act;
               }
             })
           );
 
-          console.log(`[HTTP:${requestId}] ✓ Returning ${enrichedActivities.length} enriched activities`);
           return jsonResponse(enrichedActivities, 200, request, env);
         } catch (err) {
-          console.error(`[HTTP:${requestId}] ❌ Error:`, err);
+          console.error(`[HTTP:${requestId}] ❌ Error fetching recent activities:`, err);
           return jsonResponse({ error: 'Failed to fetch recent activities' }, 500, request, env);
         }
       }
@@ -720,21 +605,15 @@ export default {
         const instanceId = url.searchParams.get('instanceId');
         
         if (!instanceId) {
-          console.log(`[HTTP:${requestId}] ❌ Missing instanceId`);
           return jsonResponse({ error: 'Missing instanceId parameter' }, 400, request, env);
         }
-
-        console.log(`[HTTP:${requestId}] Fetching PGCR for instance: ${instanceId}`);
 
         try {
           const pgcrData = await fetchPGCR(instanceId, env.BUNGIE_API_KEY);
           
           if (!pgcrData) {
-            console.log(`[HTTP:${requestId}] ❌ PGCR not found`);
             return jsonResponse({ error: 'PGCR not found' }, 404, request, env);
           }
-
-          console.log(`[HTTP:${requestId}] ✓ PGCR fetched, processing ${pgcrData.entries?.length || 0} players`);
 
           const activity = pgcrData.activityDetails || {};
           const activityHash = activity.directorActivityHash || activity.referenceId;
@@ -742,7 +621,6 @@ export default {
           let activityDef = null;
           if (activityHash) {
             activityDef = await fetchActivityDefinition(String(activityHash), env.BUNGIE_API_KEY);
-            console.log(`[HTTP:${requestId}] ✓ Activity definition: ${activityDef?.displayProperties?.name || 'Unknown'}`);
           }
 
           const players = (pgcrData.entries || []).map((entry: any) => {
@@ -774,8 +652,6 @@ export default {
             };
           });
 
-          console.log(`[HTTP:${requestId}] ✓ Returning PGCR with ${players.length} players`);
-
           return jsonResponse({
             activity: {
               name: activityDef?.displayProperties?.name || 'Unknown Activity',
@@ -792,7 +668,7 @@ export default {
             players,
           }, 200, request, env);
         } catch (err) {
-          console.error(`[HTTP:${requestId}] ❌ Error:`, err);
+          console.error(`[HTTP:${requestId}] ❌ Error fetching PGCR:`, err);
           return jsonResponse({ error: 'Failed to fetch PGCR' }, 500, request, env);
         }
       }
@@ -801,20 +677,30 @@ export default {
       if (url.pathname === '/admin/refresh' && request.method === 'POST') {
         const body = await request.json().catch(() => ({} as any));
         const type = (body.type as string) || 'all';
-        
-        console.log(`[HTTP:${requestId}] Admin refresh requested: type=${type}`);
+        const force = !!body.force;
+        const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
+
         const results: Record<string, unknown> = {};
 
+        // If force is requested and stats should be refreshed, clear existing stats for a fresh sync
+        if (force) {
+          try {
+            await env.DB.prepare(`DELETE FROM member_dungeon_stats WHERE clan_id = ?`).bind(clanId).run();
+            await env.DB.prepare(`DELETE FROM clan_aggregate_stats WHERE clan_id = ?`).bind(clanId).run();
+            results.cleared = true;
+          } catch (err) {
+            results.cleared = false;
+            results.clearError = (err as any)?.message ?? String(err);
+          }
+        }
+
         if (type === 'members' || type === 'all') {
-          console.log(`[HTTP:${requestId}] Running memberSyncCron...`);
           results.members = await memberSyncCron(env);
         }
         if (type === 'stats' || type === 'all') {
-          console.log(`[HTTP:${requestId}] Running statsSyncCron...`);
-          results.stats = await statsSyncCron(env);
+          results.stats = await statsSyncCron(env, { force });
         }
 
-        console.log(`[HTTP:${requestId}] ✓ Admin refresh complete`);
         return jsonResponse({ success: true, results }, 200, request, env);
       }
 
@@ -823,15 +709,12 @@ export default {
         const body = await request.json().catch(() => ({} as any));
         const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
         
-        console.log(`[HTTP:${requestId}] Admin recompute requested for clan: ${clanId}`);
         await (await import('./db/aggregateHelpers')).recomputeClanAggregateStats(env.DB, clanId);
-        console.log(`[HTTP:${requestId}] ✓ Recompute complete`);
         
         return jsonResponse({ success: true, clanId }, 200, request, env);
       }
 
       // 404 - Not Found
-      console.log(`[HTTP:${requestId}] ❌ 404 Not Found`);
       return jsonResponse({ error: 'Not found' }, 404, request, env);
       
     } catch (err: any) {
@@ -860,38 +743,26 @@ export default {
       
       try {
         // Detect message type by checking for specific fields
-        // MemberJob has: displayName, membershipId, runId
-        // StatsQueueJob has: jobId, dungeonHash, activities array
-        
         if (body && 'displayName' in body && 'runId' in body) {
-          // This is a MemberJob
           const job = body as MemberJob;
-          console.log(`[Queue:${batchId}] Message ${i + 1}/${batch.messages.length}: MemberJob for ${job.displayName}`);
-          
           await processMemberJob(env, job);
           message.ack();
           processedCount++;
-          console.log(`[Queue:${batchId}] ✓ Message ${i + 1} acknowledged`);
           
         } else if (body && 'jobId' in body && 'activities' in body) {
-          // This is a StatsQueueJob
           const job = body as StatsQueueJob;
-          console.log(`[Queue:${batchId}] Message ${i + 1}/${batch.messages.length}: StatsQueueJob ${job.jobId}`);
-          
           await processStatsQueueJob(env, job);
           message.ack();
           processedCount++;
-          console.log(`[Queue:${batchId}] ✓ Message ${i + 1} acknowledged`);
           
         } else {
-          console.error(`[Queue:${batchId}] ❌ Message ${i + 1}: Unknown message type`, body);
           errorCount++;
           message.ack(); // Ack it anyway to avoid reprocessing
         }
         
       } catch (err) {
         errorCount++;
-        console.error(`[Queue:${batchId}] ❌ Message ${i + 1} failed:`, err);
+        console.error(`[Queue:${batchId}] Message ${i + 1} failed:`, err);
         try { message.retry(); } catch {}
       }
     }
@@ -899,22 +770,9 @@ export default {
     console.log(`[Queue:${batchId}] Batch complete: ${processedCount} processed, ${errorCount} errors\n`);
   },
 
-  // CRON handler
   async scheduled(event: any, env: Env): Promise<void> {
-    const cronString = event.cron || '';
     const timestamp = new Date().toISOString();
-    
-    console.log(`\n[CRON] Triggered at ${timestamp}`);
-    console.log(`[CRON] Cron expression: ${cronString}`);
-    
-    if (cronString.includes('*/30')) {
-      console.log(`[CRON] Type: Member Sync (every 30 minutes)`);
-      await memberSyncCron(env);
-    } else if (cronString.includes('0 */6')) {
-      console.log(`[CRON] Type: Stats Sync (every 6 hours)`);
-      await statsSyncCron(env);
-    } else {
-      console.log(`[CRON] Unknown cron pattern: ${cronString}`);
-    }
+    console.log(`[CRON] Invocation received at ${timestamp} but cron handling is disabled. Use the /admin endpoints to trigger memberSyncCron or statsSyncCron.`);
+    return;
   },
 };

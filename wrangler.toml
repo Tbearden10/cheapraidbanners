@@ -3,11 +3,9 @@ compatibility_date = "2025-10-25"
 main = "src/index.ts"
 account_id = "5e7fb995b74586d322a72a99770b31dc"
 
-# Environment variables - Production-optimized settings
-[vars]
 # ===== CORE SETTINGS =====
+[vars]
 ENVIRONMENT = "production"
-# Set your clan id here (or via env secrets)
 BUNGIE_CLAN_ID = "5335552"
 
 # ===== D1 DATABASE =====
@@ -17,36 +15,35 @@ database_name = "clan-stats"
 database_id = "b1e78f39-6cba-4c21-a822-95e4634d6370"
 
 # ===== QUEUE CONFIGURATION =====
-# Producer / consumer for member jobs
+
+# Member queue: processes one member at a time
 [[queues.producers]]
 binding = "MEMBER_STATS_QUEUE"
 queue = "member-stats-queue"
 
 [[queues.consumers]]
 queue = "member-stats-queue"
-max_batch_size = 1
+max_batch_size = 1              # Process 1 member at a time
 max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "member-stats-dlq"
-max_concurrency = 10
+# max_concurrency = auto (default) - allows scaling up to 250 concurrent workers
 
-# Producer / consumer for PGCR / stats jobs
+# Stats queue: processes batches of 50 PGCRs
 [[queues.producers]]
 binding = "STATS_QUEUE"
 queue = "stats-queue"
 
 [[queues.consumers]]
 queue = "stats-queue"
-max_batch_size = 1
+max_batch_size = 1              # Process 1 batch (of 50 PGCRs) at a time
 max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "stats-dlq"
-max_concurrency = 10
+# max_concurrency = auto (default) - allows scaling up to 250 concurrent workers
 
 # ===== DURABLE OBJECTS =====
-[[durable_objects.bindings]]
-name = "BATCH_COORDINATOR"
-class_name = "BatchCoordinator"
+# RunTracker (optional progress tracking & aggregate recomputation)
 
 [[durable_objects.bindings]]
 name = "RUN_TRACKER"
@@ -54,22 +51,23 @@ class_name = "RunTracker"
 
 # ===== DURABLE OBJECT MIGRATIONS =====
 [[migrations]]
-tag = "v1"
-new_classes = ["BatchCoordinator", "RunTracker"]
+tag = "v4"
+
+
+# ===== WORKER LIMITS =====
+[limits]
+cpu_ms = 300000
 
 # ===== CRON TRIGGERS =====
 [triggers]
-crons = [
-  "*/30 * * * *",    # Member sync: every 30 minutes
-  "0 */6 * * *"      # Stats sync: every 6 hours (at 00:00, 06:00, 12:00, 18:00 UTC)
-]
+crons = []
 
 # ===== ROUTES =====
 [[routes]]
 pattern = "api.cheapraidbanners.com/*"
 zone_name = "cheapraidbanners.com"
 
-# ===== OPTIONAL: Development Environment Override =====
+# ===== DEVELOPMENT ENVIRONMENT =====
 [env.dev]
 [env.dev.vars]
 ENVIRONMENT = "dev"
@@ -102,11 +100,9 @@ max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "stats-dlq-local"
 
-# Durable Objects (same bindings, local instances)
-[[env.dev.durable_objects.bindings]]
-name = "BATCH_COORDINATOR"
-class_name = "BatchCoordinator"
-
 [[env.dev.durable_objects.bindings]]
 name = "RUN_TRACKER"
 class_name = "RunTracker"
+
+[[env.dev.migrations]]
+tag = "v4"

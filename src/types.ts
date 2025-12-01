@@ -41,7 +41,8 @@ export interface DurableObjectStorage {
 
 export interface DurableObjectState {
   storage: DurableObjectStorage;
-  blockConcurrencyWhile?(cb: () => Promise<void>): Promise<void>;
+  id: DurableObjectId;
+  blockConcurrencyWhile?: <T>(callback: () => Promise<T>) => Promise<T>;
 }
 
 export interface DurableObjectId {
@@ -57,16 +58,25 @@ export interface DurableObjectNamespace {
   get(id: DurableObjectId): DurableObjectInstance;
 }
 
-/** Env passed to worker handlers */
 export interface Env {
+  // API Keys
+  BUNGIE_API_KEY: string;
+  API_TOKEN?: string;
+  
+  // Config
+  ENVIRONMENT: string;
+  BUNGIE_CLAN_ID: string;
+  
+  // Database
   DB: D1Database;
-  MEMBER_STATS_QUEUE: QueueBinding<any>;
+  
+  // Queues
+  MEMBER_STATS_QUEUE: QueueBinding<MemberJob>;
+  STATS_QUEUE: QueueBinding<StatsQueueJob>;
+  
+  // Durable Objects
   BATCH_COORDINATOR: DurableObjectNamespace;
   RUN_TRACKER: DurableObjectNamespace;
-  BUNGIE_API_KEY: string;
-  BUNGIE_CLAN_ID: string;
-  API_TOKEN: string;
-  [key: string]: any;
 }
 
 /** Shapes matching DB rows (nullable where appropriate) */
@@ -121,7 +131,7 @@ export interface MemberJob {
   membershipType: number;
   displayName: string;
   lastProcessedDate?: string | null;
-  runId?: string | null;
+  runId?: string;
 }
 
 export interface StatsQueueJob {
