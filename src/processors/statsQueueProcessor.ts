@@ -1,24 +1,19 @@
 // ============================================================================
 // FILE: src/processors/statsQueueProcessor.ts
-// OPTIMIZED: Parallel PGCR fetching with rate limiting (10 concurrent)
-// Logging reduced to only key steps and summaries
+// OPTIMIZED: Fast wave-based processing matching statsProcessor.ts pattern
+// 30 activities per wave, 50ms delay, clean and simple
 // ============================================================================
 
 import type { Env, StatsQueueJob } from '../types';
 import { fetchPGCR } from '../api/bungieApi';
-import { bungieRateLimiter, processWithRateLimit } from '../utils/rateLimiter';
 
 const BEYOND_LIGHT_START_MS = Date.parse('2020-11-10T17:00:00.000Z');
 const WITCH_QUEEN_START_MS = Date.parse('2022-02-22T17:00:00.000Z');
 const HAUNTED_START_MS = Date.parse('2022-05-24T17:00:00.000Z');
 
-// Parallel fetch configuration
-const PARALLEL_BATCH_SIZE = 10; // Fetch 10 PGCRs at a time
-
-// Retry configuration
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 1000;
-const RETRY_BACKOFF_MULTIPLIER = 2;
+// Match statsProcessor.ts batch size and delay
+const PGCR_BATCH_SIZE = 30;
+const DELAY_MS = 50;
 
 function determineClearType(pgcr: any, period: string): boolean {
   const timestamp = Date.parse(period);
@@ -35,31 +30,6 @@ function determineClearType(pgcr: any, period: string): boolean {
   return true;
 }
 
-async function fetchPGCRWithRetry(
-  instanceId: string,
-  apiKey: string,
-  retries = MAX_RETRIES
-): Promise<any> {
-  let lastError: Error | null = null;
-  
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const pgcr = await fetchPGCR(instanceId, apiKey);
-      return pgcr;
-    } catch (error) {
-      lastError = error as Error;
-      
-      if (attempt < retries) {
-        const delay = RETRY_DELAY_MS * Math.pow(RETRY_BACKOFF_MULTIPLIER, attempt);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
-  }
-  
-  console.error(`[StatsQueue] All ${retries + 1} attempts failed for ${instanceId}:`, lastError);
-  return null;
-}
-
 function extractPlaytime(pgcr: any, membershipId: string): number {
   try {
     const entries = pgcr.entries || [];
@@ -70,9 +40,7 @@ function extractPlaytime(pgcr: any, membershipId: string): number {
     if (match && Number.isFinite(Number(match.values?.timePlayedSeconds?.basic?.value))) {
       return Number(match.values.timePlayedSeconds.basic.value);
     }
-  } catch (err) {
-    console.warn('[StatsQueue] Failed to extract playtime:', err);
-  }
+  } catch {}
   return 0;
 }
 
@@ -88,7 +56,6 @@ async function writeIncremental(env: Env, data: {
 }): Promise<void> {
   const now = Date.now();
   
-  // Upsert member_dungeon_stats with incremental deltas
   await env.DB.prepare(`
     INSERT INTO member_dungeon_stats (
       clan_id, membership_id, membership_type, dungeon_hash,
@@ -119,7 +86,6 @@ async function writeIncremental(env: Env, data: {
     now
   ).run();
   
-  // Incrementally update clan aggregates
   await env.DB.prepare(`
     INSERT INTO clan_aggregate_stats (
       clan_id, dungeon_hash,
@@ -143,104 +109,99 @@ async function writeIncremental(env: Env, data: {
 
 export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promise<void> {
   const startTime = Date.now();
+  console.log(`[StatsQueue] Processing ${job.activities.length} PGCRs (${job.jobId})`);
 
-  console.log(`\n${'─'.repeat(80)}`);
-  console.log(`[StatsQueue] START Processing batch - Job ID: ${job.jobId} | Membership: ${job.membershipId} | Dungeon: ${job.dungeonHash}`);
-  console.log(`[StatsQueue] Activities in batch: ${job.activities.length}`);
-  console.log(`${'─'.repeat(80)}`);
-
-  // Check rate limiter status
-  try {
-    const status = bungieRateLimiter.getStatus();
-    console.log(`[StatsQueue] Rate limiter: ${status.available}/${status.capacity} tokens available`);
-  } catch {
-    // silent if rate limiter not available
-  }
-
-  // PARALLEL PGCR fetching with rate limiting
   let fullClearsFound = 0;
   let totalPlaytime = 0;
   let latestActivityDate: string | null = null;
-  let pgcrSuccessCount = 0;
-  let pgcrFailureCount = 0;
+  let successCount = 0;
 
-  console.log(`[StatsQueue] Fetching ${job.activities.length} PGCRs in parallel (batches of ${PARALLEL_BATCH_SIZE})...`);
-  
-  // Process activities in parallel with rate limiting
-  const results = await processWithRateLimit(
-    job.activities,
-    async (activity) => {
-      try {
-        const pgcr = await fetchPGCRWithRetry(activity.instanceId, env.BUNGIE_API_KEY);
+  // Process in batches of 30 (matching statsProcessor.ts)
+  for (let i = 0; i < job.activities.length; i += PGCR_BATCH_SIZE) {
+    const batch = job.activities.slice(i, Math.min(i + PGCR_BATCH_SIZE, job.activities.length));
+    
+    // Fetch batch concurrently using Promise.allSettled
+    const batchResults = await Promise.allSettled(
+      batch.map(async (activity) => {
+        const pgcr = await fetchPGCR(activity.instanceId, env.BUNGIE_API_KEY);
         
-        if (!pgcr) {
-          return null;
-        }
-        
-        const isFullClear = determineClearType(pgcr, activity.date || '');
-        const playtime = extractPlaytime(pgcr, job.membershipId);
+        if (!pgcr) return null;
         
         return {
-          isFullClear,
-          playtime,
+          isFullClear: determineClearType(pgcr, activity.date || ''),
+          playtime: extractPlaytime(pgcr, job.membershipId),
           date: activity.date,
         };
-      } catch (err) {
-        // return null and count as failure (aggregated below)
-        return null;
-      }
-    },
-    {
-      rateLimiter: bungieRateLimiter,
-      batchSize: PARALLEL_BATCH_SIZE,
-      onProgress: (completed, total) => {
-        // Only log coarse-grained progress (every 50 or on completion)
-        if (completed % 50 === 0 || completed === total) {
-          console.log(`[StatsQueue]   Progress: ${completed}/${total}`);
+      })
+    );
+    
+    // Aggregate batch results
+    for (const result of batchResults) {
+      if (result.status === 'fulfilled' && result.value) {
+        successCount++;
+        if (result.value.isFullClear) fullClearsFound++;
+        totalPlaytime += result.value.playtime;
+        if (result.value.date && (!latestActivityDate || result.value.date > latestActivityDate)) {
+          latestActivityDate = result.value.date;
         }
-      },
-    }
-  );
-
-  // Aggregate results
-  for (const result of results) {
-    if (result) {
-      pgcrSuccessCount++;
-      if (result.isFullClear) fullClearsFound++;
-      totalPlaytime += result.playtime || 0;
-      if (result.date && (!latestActivityDate || result.date > latestActivityDate)) {
-        latestActivityDate = result.date;
       }
-    } else {
-      pgcrFailureCount++;
+    }
+    
+    // Delay between batches (matching statsProcessor.ts)
+    if (i + PGCR_BATCH_SIZE < job.activities.length) {
+      await new Promise(resolve => setTimeout(resolve, DELAY_MS));
     }
   }
 
-  console.log(`[StatsQueue] Processing Summary: success=${pgcrSuccessCount} failed=${pgcrFailureCount} fullClears=${fullClearsFound} totalPlaytime=${totalPlaytime}s (${(totalPlaytime/3600).toFixed(2)}h)`);
+  // Write to database
+  await writeIncremental(env, {
+    clanId: job.clanId,
+    membershipId: job.membershipId,
+    membershipType: job.membershipType,
+    dungeonHash: job.dungeonHash,
+    clearsDelta: successCount,
+    fullClearsDelta: fullClearsFound,
+    playtimeDelta: totalPlaytime,
+    lastProcessedDate: latestActivityDate,
+  });
 
-  // Write incremental deltas to database immediately
-  try {
-    console.log(`[StatsQueue] Writing incremental deltas to database...`);
-    
-    await writeIncremental(env, {
-      clanId: job.clanId,
-      membershipId: job.membershipId,
-      membershipType: job.membershipType,
-      dungeonHash: job.dungeonHash,
-      clearsDelta: pgcrSuccessCount,
-      fullClearsDelta: fullClearsFound,
-      playtimeDelta: totalPlaytime,
-      lastProcessedDate: latestActivityDate,
-    });
-    
-    console.log(`[StatsQueue] ✓ Database write complete`);
-    
-  } catch (err) {
-    console.error(`[StatsQueue] ✗ Database write failed:`, err);
-    throw err;
+  // Report to MemberCoordinator if coordinatorId provided
+  if (job.coordinatorId) {
+    try {
+      const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.coordinatorId);
+      const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
+      
+      const response = await coordinator.fetch('https://internal/batch', {
+        method: 'POST',
+        body: JSON.stringify({
+          batchId: job.jobId,
+          dungeonHash: job.dungeonHash,
+          batchIndex: parseInt(job.jobId.split('-').pop() || '0'),
+          clearsDelta: successCount,
+          fullClearsDelta: fullClearsFound,
+          playtimeDelta: totalPlaytime,
+          lastProcessedDate: latestActivityDate,
+        }),
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      const result = await response.json() as { complete: boolean; aggregated?: any };
+      
+      if (result.complete) {
+        console.log(`[StatsQueue] ✓ All batches complete for member ${job.membershipId}`);
+        // Optionally: trigger additional processing when all member batches are done
+      }
+    } catch (err) {
+      console.warn('[StatsQueue] Failed to report to MemberCoordinator:', err);
+    }
   }
 
   const duration = Date.now() - startTime;
-  console.log(`[StatsQueue] COMPLETE - Duration: ${duration}ms (${(duration / 1000).toFixed(2)}s)`);
-  console.log(`${'─'.repeat(80)}\n`);
+  const reqPerSec = ((successCount) / (duration / 1000)).toFixed(1);
+  const failureCount = job.activities.length - successCount;
+  
+  console.log(
+    `[StatsQueue] ✓ ${successCount}/${job.activities.length} in ${(duration/1000).toFixed(1)}s ` +
+    `(${reqPerSec} req/s) | Clears: ${fullClearsFound} | Failed: ${failureCount}`
+  );
 }

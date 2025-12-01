@@ -24,10 +24,10 @@ queue = "member-stats-queue"
 [[queues.consumers]]
 queue = "member-stats-queue"
 max_batch_size = 1              # Process 1 member at a time
-max_batch_timeout = 5
+max_batch_timeout = 10
 max_retries = 3
 dead_letter_queue = "member-stats-dlq"
-# max_concurrency = auto (default) - allows scaling up to 250 concurrent workers
+max_concurrency = 1
 
 # Stats queue: processes batches of 50 PGCRs
 [[queues.producers]]
@@ -37,10 +37,10 @@ queue = "stats-queue"
 [[queues.consumers]]
 queue = "stats-queue"
 max_batch_size = 1              # Process 1 batch (of 50 PGCRs) at a time
-max_batch_timeout = 5
+max_batch_timeout = 10
 max_retries = 3
 dead_letter_queue = "stats-dlq"
-# max_concurrency = auto (default) - allows scaling up to 250 concurrent workers
+max_concurrency = 1
 
 # ===== DURABLE OBJECTS =====
 # RunTracker (optional progress tracking & aggregate recomputation)
@@ -49,9 +49,14 @@ dead_letter_queue = "stats-dlq"
 name = "RUN_TRACKER"
 class_name = "RunTracker"
 
+[[durable_objects.bindings]]
+name = "MEMBER_COORDINATOR"
+class_name = "MemberCoordinator"
+
 # ===== DURABLE OBJECT MIGRATIONS =====
 [[migrations]]
-tag = "v4"
+tag = "v5"
+new_classes = ["MemberCoordinator"]
 
 
 # ===== WORKER LIMITS =====
@@ -104,5 +109,11 @@ dead_letter_queue = "stats-dlq-local"
 name = "RUN_TRACKER"
 class_name = "RunTracker"
 
+[[env.dev.durable_objects.bindings]]
+name = "MEMBER_COORDINATOR"
+class_name = "MemberCoordinator"
+
+
 [[env.dev.migrations]]
-tag = "v4"
+tag = "v5"
+new_classes = ["MemberCoordinator"]
