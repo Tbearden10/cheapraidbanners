@@ -197,12 +197,8 @@ export class RunTracker {
           // Delete the index itself
           await this.state.storage.delete(RUN_INDEX_KEY);
           
-          // Cancel any pending alarms
-          try {
-            await this.state.storage.deleteAlarm?.();
-          } catch (e) {
-            // deleteAlarm might not exist in all environments, ignore
-          }
+          // Cancel any pending alarms (optional method may not exist in all environments)
+          await this.state.storage.deleteAlarm?.();
         });
         
         console.log(`[RunTracker:Reset] ✅ Cleared ${clearedCount} run(s) and reset state`);

@@ -746,7 +746,8 @@ export default {
             body: JSON.stringify({ clanId }),
             headers: { 'Content-Type': 'application/json' },
           });
-          try { await res.text(); } catch (e) { try { res.body?.cancel(); } catch {} }
+          // Consume response body to avoid memory leaks
+          await res.text().catch(() => res.body?.cancel().catch(() => {}));
           results.runTrackerReset = true;
           console.log(`[Admin:CancelAll] ✓ RunTracker reset for clan ${clanId}`);
         } catch (err) {
