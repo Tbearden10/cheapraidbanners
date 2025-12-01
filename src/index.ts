@@ -723,6 +723,67 @@ export default {
         return jsonResponse({ success: true, clanId }, 200, request, env);
       }
 
+      // POST /admin/cancel-all - Clears, stops, and erases all runs/jobs
+      if (url.pathname === '/admin/cancel-all' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({} as any));
+        const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
+        const clearStats = Boolean(body.clearStats); // Optional: also clear stats from DB
+        
+        console.log(`[Admin:CancelAll] Starting cancellation for clan ${clanId}, clearStats=${clearStats}`);
+        
+        const results: Record<string, unknown> = {
+          runTrackerReset: false,
+          statsCleared: false,
+          aggregatesCleared: false,
+        };
+
+        // Reset RunTracker for this clan
+        try {
+          const trackerId = env.RUN_TRACKER.idFromName(`run-tracker-${clanId}`);
+          const tracker = env.RUN_TRACKER.get(trackerId);
+          const res = await tracker.fetch('https://internal/reset', {
+            method: 'POST',
+            body: JSON.stringify({ clanId }),
+            headers: { 'Content-Type': 'application/json' },
+          });
+          try { await res.text(); } catch (e) { try { res.body?.cancel(); } catch {} }
+          results.runTrackerReset = true;
+          console.log(`[Admin:CancelAll] ✓ RunTracker reset for clan ${clanId}`);
+        } catch (err) {
+          console.warn(`[Admin:CancelAll] Failed to reset RunTracker:`, err);
+          results.runTrackerError = (err as any)?.message ?? String(err);
+        }
+
+        // Optionally clear stats from database
+        if (clearStats) {
+          try {
+            await env.DB.prepare(`DELETE FROM member_dungeon_stats WHERE clan_id = ?`).bind(clanId).run();
+            results.statsCleared = true;
+            console.log(`[Admin:CancelAll] ✓ Cleared member_dungeon_stats for clan ${clanId}`);
+          } catch (err) {
+            console.warn(`[Admin:CancelAll] Failed to clear stats:`, err);
+            results.statsError = (err as any)?.message ?? String(err);
+          }
+
+          try {
+            await env.DB.prepare(`DELETE FROM clan_aggregate_stats WHERE clan_id = ?`).bind(clanId).run();
+            results.aggregatesCleared = true;
+            console.log(`[Admin:CancelAll] ✓ Cleared clan_aggregate_stats for clan ${clanId}`);
+          } catch (err) {
+            console.warn(`[Admin:CancelAll] Failed to clear aggregates:`, err);
+            results.aggregatesError = (err as any)?.message ?? String(err);
+          }
+        }
+
+        console.log(`[Admin:CancelAll] ✓ Cancellation complete for clan ${clanId}`);
+        return jsonResponse({ 
+          success: true, 
+          clanId, 
+          message: 'All runs cancelled and state cleared',
+          results 
+        }, 200, request, env);
+      }
+
       // 404 - Not Found
       return jsonResponse({ error: 'Not found' }, 404, request, env);
       

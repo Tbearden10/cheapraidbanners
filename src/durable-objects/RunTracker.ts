@@ -172,6 +172,43 @@ export class RunTracker {
         return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
       }
 
+      // POST /reset - Clear all runs and reset state
+      if (path === '/reset' && req.method === 'POST') {
+        console.log(`[RunTracker:Reset] Clearing all runs and state`);
+        
+        let clearedCount = 0;
+        
+        await this.state.blockConcurrencyWhile?.(async () => {
+          // Get the run index to know what to delete
+          const idx = (await this.state.storage.get(RUN_INDEX_KEY)) as Array<{ runId: string; createdAt: number }> | undefined;
+          
+          if (idx && idx.length > 0) {
+            // Delete all run entries
+            for (const entry of idx) {
+              try {
+                await this.state.storage.delete(`${RUN_KEY_PREFIX}${entry.runId}`);
+                clearedCount++;
+              } catch (e) {
+                console.warn(`[RunTracker:Reset] Failed to delete run ${entry.runId}:`, e);
+              }
+            }
+          }
+          
+          // Delete the index itself
+          await this.state.storage.delete(RUN_INDEX_KEY);
+          
+          // Cancel any pending alarms
+          try {
+            await this.state.storage.deleteAlarm?.();
+          } catch (e) {
+            // deleteAlarm might not exist in all environments, ignore
+          }
+        });
+        
+        console.log(`[RunTracker:Reset] ✅ Cleared ${clearedCount} run(s) and reset state`);
+        return new Response(JSON.stringify({ ok: true, cleared: clearedCount }), { headers: { 'Content-Type': 'application/json' } });
+      }
+
       console.log(`[RunTracker] ❌ 404 Not Found: ${path}`);
       return new Response('Not Found', { status: 404 });
       

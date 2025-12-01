@@ -111,14 +111,41 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
   const startTime = Date.now();
   console.log(`[StatsQueue] Processing ${job.activities.length} PGCRs (${job.jobId})`);
 
+  // Fetch current last_processed_date to filter out already-processed activities
+  const prevRow = await env.DB.prepare(`
+    SELECT last_processed_date
+    FROM member_dungeon_stats
+    WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
+  `).bind(job.clanId, job.membershipId, job.dungeonHash).first();
+  
+  const dbLastProcessedDate = prevRow ? (prevRow as any).last_processed_date : null;
+  const cutoffMs = dbLastProcessedDate ? new Date(dbLastProcessedDate).getTime() : 0;
+
+  // Filter activities to only those after the cutoff date (prevents double counting on retry)
+  const activitiesToProcess = job.activities.filter(activity => {
+    if (!cutoffMs || !activity.date) return true;
+    try {
+      const activityMs = new Date(activity.date).getTime();
+      return activityMs > cutoffMs;
+    } catch {
+      return true;
+    }
+  });
+
+  // Skip if all activities have already been processed
+  if (activitiesToProcess.length === 0) {
+    console.log(`[StatsQueue] ⏭️ All activities already processed (${job.jobId})`);
+    return;
+  }
+
   let fullClearsFound = 0;
   let totalPlaytime = 0;
   let latestActivityDate: string | null = null;
   let successCount = 0;
 
   // Process in batches of 30 (matching statsProcessor.ts)
-  for (let i = 0; i < job.activities.length; i += PGCR_BATCH_SIZE) {
-    const batch = job.activities.slice(i, Math.min(i + PGCR_BATCH_SIZE, job.activities.length));
+  for (let i = 0; i < activitiesToProcess.length; i += PGCR_BATCH_SIZE) {
+    const batch = activitiesToProcess.slice(i, Math.min(i + PGCR_BATCH_SIZE, activitiesToProcess.length));
     
     // Fetch batch concurrently using Promise.allSettled
     const batchResults = await Promise.allSettled(
@@ -148,22 +175,24 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
     }
     
     // Delay between batches (matching statsProcessor.ts)
-    if (i + PGCR_BATCH_SIZE < job.activities.length) {
+    if (i + PGCR_BATCH_SIZE < activitiesToProcess.length) {
       await new Promise(resolve => setTimeout(resolve, DELAY_MS));
     }
   }
 
-  // Write to database
-  await writeIncremental(env, {
-    clanId: job.clanId,
-    membershipId: job.membershipId,
-    membershipType: job.membershipType,
-    dungeonHash: job.dungeonHash,
-    clearsDelta: successCount,
-    fullClearsDelta: fullClearsFound,
-    playtimeDelta: totalPlaytime,
-    lastProcessedDate: latestActivityDate,
-  });
+  // Only write to database if we actually processed new activities
+  if (successCount > 0) {
+    await writeIncremental(env, {
+      clanId: job.clanId,
+      membershipId: job.membershipId,
+      membershipType: job.membershipType,
+      dungeonHash: job.dungeonHash,
+      clearsDelta: successCount,
+      fullClearsDelta: fullClearsFound,
+      playtimeDelta: totalPlaytime,
+      lastProcessedDate: latestActivityDate,
+    });
+  }
 
   // Report to MemberCoordinator if coordinatorId provided
   if (job.coordinatorId) {
@@ -197,11 +226,12 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
   }
 
   const duration = Date.now() - startTime;
-  const reqPerSec = ((successCount) / (duration / 1000)).toFixed(1);
-  const failureCount = job.activities.length - successCount;
+  const reqPerSec = successCount > 0 ? ((successCount) / (duration / 1000)).toFixed(1) : '0';
+  const skippedCount = job.activities.length - activitiesToProcess.length;
+  const failureCount = activitiesToProcess.length - successCount;
   
   console.log(
-    `[StatsQueue] ✓ ${successCount}/${job.activities.length} in ${(duration/1000).toFixed(1)}s ` +
-    `(${reqPerSec} req/s) | Clears: ${fullClearsFound} | Failed: ${failureCount}`
+    `[StatsQueue] ✓ ${successCount}/${activitiesToProcess.length} in ${(duration/1000).toFixed(1)}s ` +
+    `(${reqPerSec} req/s) | Clears: ${fullClearsFound} | Skipped: ${skippedCount} | Failed: ${failureCount}`
   );
 }

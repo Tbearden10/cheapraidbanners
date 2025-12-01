@@ -35,8 +35,10 @@ export interface DurableObjectStorage {
   get(key: string): Promise<any>;
   put(key: string, value: any): Promise<void>;
   delete(key: string): Promise<void>;
+  deleteAll?(): Promise<void>;
   list?(options?: any): AsyncIterable<{ key: string; value?: any }>;
   setAlarm(when: number): Promise<void>;
+  deleteAlarm?(): Promise<void>;
 }
 
 export interface DurableObjectState {
@@ -77,6 +79,7 @@ export interface Env {
   // Durable Objects
   BATCH_COORDINATOR: DurableObjectNamespace;
   RUN_TRACKER: DurableObjectNamespace;
+  MEMBER_COORDINATOR: DurableObjectNamespace;
 }
 
 /** Shapes matching DB rows (nullable where appropriate) */
@@ -148,4 +151,5 @@ export interface StatsQueueJob {
   jobId: string;
   batchIndex?: number;
   totalBatches?: number;
+  coordinatorId?: string;
 }
