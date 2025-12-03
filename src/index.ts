@@ -781,7 +781,26 @@ export default {
 
   async scheduled(event: any, env: Env): Promise<void> {
     const timestamp = new Date().toISOString();
-    console.log(`[CRON] Invocation received at ${timestamp} but cron handling is disabled. Use the /admin endpoints to trigger memberSyncCron or statsSyncCron.`);
-    return;
-  },
+    const cron = event.cron || 'unknown';
+    
+    console.log(`[CRON] Triggered at ${timestamp} with schedule: ${cron}`);
+    
+    try {
+      // Stats sync: runs daily at 12 PM MST (19:00 UTC)
+      if (cron === '0 19 * * *') {
+        console.log('[CRON] Executing stats sync (daily at 12 PM MST)');
+        await statsSyncCron(env);
+      } 
+      // Member sync: runs every hour
+      else if (cron === '0 * * * *') {
+        console.log('[CRON] Executing member sync (hourly)');
+        await memberSyncCron(env);
+      } 
+      else {
+        console.log('[CRON] Unknown cron schedule');
+      }
+    } catch (err) {
+      console.error('[CRON] Error in scheduled handler:', err);
+    }
+  }
 };

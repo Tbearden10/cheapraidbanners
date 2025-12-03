@@ -65,7 +65,10 @@ cpu_ms = 300000
 
 # ===== CRON TRIGGERS =====
 [triggers]
-crons = []
+crons = [
+  "0 * * * *",      # Member sync: Every hour at minute 0
+  "0 19 * * *"      # Stats sync: Every day at 12 PM MST (19:00 UTC)
+]
 
 # ===== ROUTES =====
 [[routes]]
