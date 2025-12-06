@@ -172,6 +172,7 @@ export async function recomputeClanAggregateStats(
   ).run();
 
   // Clean up any stale aggregates (exclude 'all' from deletion)
+  // Note: placeholders is safe - it's just '?' chars, actual values are parameterized via .bind()
   const dungeonHashes = aggregated.map((r: any) => r.dungeon_hash);
   if (dungeonHashes.length > 0) {
     const placeholders = dungeonHashes.map(() => '?').join(',');
@@ -179,6 +180,12 @@ export async function recomputeClanAggregateStats(
       DELETE FROM clan_aggregate_stats
       WHERE clan_id = ? AND dungeon_hash NOT IN (${placeholders}) AND dungeon_hash != 'all'
     `).bind(clanId, ...dungeonHashes).run();
+  } else {
+    // No active members with stats - clean up all except 'all'
+    await db.prepare(`
+      DELETE FROM clan_aggregate_stats
+      WHERE clan_id = ? AND dungeon_hash != 'all'
+    `).bind(clanId).run();
   }
 
   console.log(`[Aggregate] Recomputed ${aggregated.length} dungeons + overall for clan ${clanId}`);
