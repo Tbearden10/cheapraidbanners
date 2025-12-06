@@ -67,7 +67,8 @@ cpu_ms = 300000
 [triggers]
 crons = [
   "0 * * * *",      # Member sync: Every hour at minute 0
-  "0 19 * * *"      # Stats sync: Every day at 12 PM MST (19:00 UTC)
+  "0 19 * * *",     # Stats sync: Every day at 12 PM MST (19:00 UTC)
+  "0 20 * * *"      # Aggregate recompute: Every day at 1 PM MST (20:00 UTC)
 ]
 
 # ===== ROUTES =====

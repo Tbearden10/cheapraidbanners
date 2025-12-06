@@ -190,31 +190,39 @@ export async function getClanAggregateStats(
 /**
  * Recompute clan aggregate stats (sum all member stats)
  * Now properly handles both total_clears and total_full_clears
+ * IMPORTANT: Only includes stats from ACTIVE clan members
  */
 export async function recomputeClanAggregateStats(
   db: D1Database,
   clanId: string
 ) {
-  // Get all dungeon hashes
+  // Get all dungeon hashes from active members only
   const dungeonHashesResult = await db.prepare(`
-    SELECT DISTINCT dungeon_hash FROM member_dungeon_stats
-    WHERE clan_id = ?
+    SELECT DISTINCT mds.dungeon_hash 
+    FROM member_dungeon_stats mds
+    INNER JOIN clan_members cm 
+      ON mds.clan_id = cm.clan_id 
+      AND mds.membership_id = cm.membership_id
+    WHERE mds.clan_id = ? AND cm.is_active = 1
   `).bind(clanId).all();
 
   const dungeonHashes = (dungeonHashesResult.results || []).map(
     (r: any) => r.dungeon_hash
   );
 
-  // Compute aggregate for each dungeon
+  // Compute aggregate for each dungeon (active members only)
   for (const dungeonHash of dungeonHashes) {
     const result = await db.prepare(`
       SELECT 
-        COALESCE(SUM(total_clears), 0) as total_clears,
-        COALESCE(SUM(total_full_clears), 0) as total_full_clears,
-        COALESCE(SUM(total_playtime_seconds), 0) as total_playtime_seconds,
-        COUNT(DISTINCT membership_id) as active_member_count
-      FROM member_dungeon_stats
-      WHERE clan_id = ? AND dungeon_hash = ?
+        COALESCE(SUM(mds.total_clears), 0) as total_clears,
+        COALESCE(SUM(mds.total_full_clears), 0) as total_full_clears,
+        COALESCE(SUM(mds.total_playtime_seconds), 0) as total_playtime_seconds,
+        COUNT(DISTINCT mds.membership_id) as active_member_count
+      FROM member_dungeon_stats mds
+      INNER JOIN clan_members cm 
+        ON mds.clan_id = cm.clan_id 
+        AND mds.membership_id = cm.membership_id
+      WHERE mds.clan_id = ? AND mds.dungeon_hash = ? AND cm.is_active = 1
     `).bind(clanId, dungeonHash).first();
 
     await db.prepare(`
@@ -240,15 +248,18 @@ export async function recomputeClanAggregateStats(
     ).run();
   }
 
-  // Compute overall aggregate (sum of all dungeons)
+  // Compute overall aggregate (sum of all dungeons, active members only)
   const overallResult = await db.prepare(`
     SELECT 
-      COALESCE(SUM(total_clears), 0) as total_clears,
-      COALESCE(SUM(total_full_clears), 0) as total_full_clears,
-      COALESCE(SUM(total_playtime_seconds), 0) as total_playtime_seconds,
-      COUNT(DISTINCT membership_id) as active_member_count
-    FROM member_dungeon_stats
-    WHERE clan_id = ?
+      COALESCE(SUM(mds.total_clears), 0) as total_clears,
+      COALESCE(SUM(mds.total_full_clears), 0) as total_full_clears,
+      COALESCE(SUM(mds.total_playtime_seconds), 0) as total_playtime_seconds,
+      COUNT(DISTINCT mds.membership_id) as active_member_count
+    FROM member_dungeon_stats mds
+    INNER JOIN clan_members cm 
+      ON mds.clan_id = cm.clan_id 
+      AND mds.membership_id = cm.membership_id
+    WHERE mds.clan_id = ? AND cm.is_active = 1
   `).bind(clanId).first();
 
   await db.prepare(`
