@@ -796,6 +796,13 @@ export default {
         console.log('[CRON] Executing member sync (hourly)');
         await memberSyncCron(env);
       } 
+      // Aggregate recompute: runs daily at 1 PM MST (20:00 UTC)
+      else if (cron === '0 20 * * *') {
+        console.log('[CRON] Executing aggregate recompute (daily at 1 PM MST)');
+        const clanId = env.BUNGIE_CLAN_ID;
+        await (await import('./db/aggregateHelpers')).recomputeClanAggregateStats(env.DB, clanId);
+        console.log('[CRON] Aggregate recompute complete');
+      }
       else {
         console.log('[CRON] Unknown cron schedule');
       }

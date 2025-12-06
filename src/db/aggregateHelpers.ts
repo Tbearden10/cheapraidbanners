@@ -77,6 +77,7 @@ export async function applyClanAggregateDelta(
 /**
  * Full recompute - sum all member stats and replace aggregates
  * Call this periodically (daily/weekly) to fix any drift
+ * IMPORTANT: Only includes stats from ACTIVE clan members
  */
 export async function recomputeClanAggregateStats(
   db: D1Database,
@@ -84,17 +85,20 @@ export async function recomputeClanAggregateStats(
 ): Promise<void> {
   console.log(`[Aggregate] Recomputing clan stats for ${clanId}...`);
 
-  // Sum all member stats by dungeon
+  // Sum all member stats by dungeon, filtering by active members only
   const rows = await db.prepare(`
     SELECT 
-      dungeon_hash,
-      COALESCE(SUM(total_clears), 0) AS total_clears,
-      COALESCE(SUM(total_full_clears), 0) AS total_full_clears,
-      COALESCE(SUM(total_playtime_seconds), 0) AS total_playtime_seconds,
-      COUNT(DISTINCT membership_id) AS active_member_count
-    FROM member_dungeon_stats
-    WHERE clan_id = ?
-    GROUP BY dungeon_hash
+      mds.dungeon_hash,
+      COALESCE(SUM(mds.total_clears), 0) AS total_clears,
+      COALESCE(SUM(mds.total_full_clears), 0) AS total_full_clears,
+      COALESCE(SUM(mds.total_playtime_seconds), 0) AS total_playtime_seconds,
+      COUNT(DISTINCT mds.membership_id) AS active_member_count
+    FROM member_dungeon_stats mds
+    INNER JOIN clan_members cm 
+      ON mds.clan_id = cm.clan_id 
+      AND mds.membership_id = cm.membership_id
+    WHERE mds.clan_id = ? AND cm.is_active = 1
+    GROUP BY mds.dungeon_hash
   `).bind(clanId).all();
 
   const aggregated = rows.results || [];
