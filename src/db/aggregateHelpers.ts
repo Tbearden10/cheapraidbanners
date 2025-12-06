@@ -129,15 +129,57 @@ export async function recomputeClanAggregateStats(
     ).run();
   }
 
-  // Clean up any stale aggregates
+  // Compute overall aggregate (sum of all per-dungeon aggregates)
+  const overallTotals = aggregated.reduce((acc, row: any) => ({
+    totalClears: acc.totalClears + Number((row as any).total_clears || 0),
+    totalFullClears: acc.totalFullClears + Number((row as any).total_full_clears || 0),
+    totalPlaytime: acc.totalPlaytime + Number((row as any).total_playtime_seconds || 0),
+  }), { totalClears: 0, totalFullClears: 0, totalPlaytime: 0 });
+
+  // Get unique active member count across all dungeons
+  const uniqueMembersResult = await db.prepare(`
+    SELECT COUNT(DISTINCT mds.membership_id) as active_member_count
+    FROM member_dungeon_stats mds
+    INNER JOIN clan_members cm 
+      ON mds.clan_id = cm.clan_id 
+      AND mds.membership_id = cm.membership_id
+    WHERE mds.clan_id = ? AND cm.is_active = 1
+  `).bind(clanId).first();
+
+  const uniqueActiveMemberCount = Number((uniqueMembersResult as any)?.active_member_count || 0);
+
+  // Upsert the "all" aggregate
+  await db.prepare(`
+    INSERT INTO clan_aggregate_stats (
+      clan_id, dungeon_hash,
+      total_clears, total_full_clears, total_playtime_seconds,
+      active_member_count, last_updated
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(clan_id, dungeon_hash) DO UPDATE SET
+      total_clears = excluded.total_clears,
+      total_full_clears = excluded.total_full_clears,
+      total_playtime_seconds = excluded.total_playtime_seconds,
+      active_member_count = excluded.active_member_count,
+      last_updated = excluded.last_updated
+  `).bind(
+    clanId,
+    'all',
+    overallTotals.totalClears,
+    overallTotals.totalFullClears,
+    overallTotals.totalPlaytime,
+    uniqueActiveMemberCount,
+    now
+  ).run();
+
+  // Clean up any stale aggregates (exclude 'all' from deletion)
   const dungeonHashes = aggregated.map((r: any) => r.dungeon_hash);
   if (dungeonHashes.length > 0) {
     const placeholders = dungeonHashes.map(() => '?').join(',');
     await db.prepare(`
       DELETE FROM clan_aggregate_stats
-      WHERE clan_id = ? AND dungeon_hash NOT IN (${placeholders})
+      WHERE clan_id = ? AND dungeon_hash NOT IN (${placeholders}) AND dungeon_hash != 'all'
     `).bind(clanId, ...dungeonHashes).run();
   }
 
-  console.log(`[Aggregate] Recomputed ${aggregated.length} dungeons for clan ${clanId}`);
+  console.log(`[Aggregate] Recomputed ${aggregated.length} dungeons + overall for clan ${clanId}`);
 }
