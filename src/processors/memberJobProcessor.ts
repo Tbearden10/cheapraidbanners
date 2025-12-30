@@ -34,231 +34,231 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       return;
     }
 
-  // Fetch all activities
-  const activitiesByChar = await fetchAllActivities(
-    job.membershipType,
-    job.membershipId,
-    characters.map((c: any) => c.characterId),
-    env.BUNGIE_API_KEY
-  );
+    // Fetch all activities
+    const activitiesByChar = await fetchAllActivities(
+      job.membershipType,
+      job.membershipId,
+      characters.map((c: any) => c.characterId),
+      env.BUNGIE_API_KEY
+    );
 
-  const totalActivitiesFetched = Object.values(activitiesByChar).reduce(
-    (sum, acts) => sum + acts.length, 0
-  );
-  
-  console.log(`[MemberJob] Fetched ${totalActivitiesFetched} activities for ${job.displayName}`);
+    const totalActivitiesFetched = Object.values(activitiesByChar).reduce(
+      (sum, acts) => sum + acts.length, 0
+    );
+    
+    console.log(`[MemberJob] Fetched ${totalActivitiesFetched} activities for ${job.displayName}`);
 
-  // Group by dungeon hash
-  const activitiesByDungeon: Record<string, any[]> = {};
-  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-    activitiesByDungeon[dungeon.hash] = [];
-  }
+    // Group by dungeon hash
+    const activitiesByDungeon: Record<string, any[]> = {};
+    for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+      activitiesByDungeon[dungeon.hash] = [];
+    }
 
-  for (const charId of Object.keys(activitiesByChar)) {
-    for (const activity of activitiesByChar[charId]) {
-      const refId = String(activity?.activityDetails?.referenceId || '');
-      
-      for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-        if (dungeon.referenceIds.includes(refId)) {
-          activitiesByDungeon[dungeon.hash].push({
-            ...activity,
-            characterId: charId,
-          });
-          break;
+    for (const charId of Object.keys(activitiesByChar)) {
+      for (const activity of activitiesByChar[charId]) {
+        const refId = String(activity?.activityDetails?.referenceId || '');
+        
+        for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+          if (dungeon.referenceIds.includes(refId)) {
+            activitiesByDungeon[dungeon.hash].push({
+              ...activity,
+              characterId: charId,
+            });
+            break;
+          }
         }
       }
     }
-  }
 
-  // Dedupe per dungeon
-  for (const hash of Object.keys(activitiesByDungeon)) {
-    const map = new Map<string, any>();
-    
-    for (const act of activitiesByDungeon[hash]) {
-      const id = act.activityDetails?.instanceId || act.instanceId;
-      if (!id) continue;
+    // Dedupe per dungeon
+    for (const hash of Object.keys(activitiesByDungeon)) {
+      const map = new Map<string, any>();
       
-      const existing = map.get(id);
-      if (!existing) {
-        map.set(id, act);
-      } else {
-        // Prefer completed activities
-        const existingCompleted = !!(existing?.values?.completed?.basic?.value === 1);
-        const newCompleted = !!(act?.values?.completed?.basic?.value === 1);
-        if (!existingCompleted && newCompleted) {
+      for (const act of activitiesByDungeon[hash]) {
+        const id = act.activityDetails?.instanceId || act.instanceId;
+        if (!id) continue;
+        
+        const existing = map.get(id);
+        if (!existing) {
           map.set(id, act);
+        } else {
+          // Prefer completed activities
+          const existingCompleted = !!(existing?.values?.completed?.basic?.value === 1);
+          const newCompleted = !!(act?.values?.completed?.basic?.value === 1);
+          if (!existingCompleted && newCompleted) {
+            map.set(id, act);
+          }
         }
       }
-    }
-    activitiesByDungeon[hash] = Array.from(map.values());
-  }
-
-  // Calculate total batches across all dungeons
-  let totalBatches = 0;
-  const dungeonBatchCounts: Record<string, number> = {};
-  
-  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-    const dungeonHash = dungeon.hash;
-    const activities = activitiesByDungeon[dungeonHash] || [];
-    if (activities.length === 0) continue;
-
-    const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
-    if (completed.length === 0) continue;
-
-    // Check DB for previous stats
-    const prevRow = await env.DB.prepare(`
-      SELECT last_processed_date, total_clears
-      FROM member_dungeon_stats
-      WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
-    `).bind(job.clanId, job.membershipId, dungeonHash).first();
-
-    let cutoffDate: Date | null = null;
-    if (prevRow && (prevRow as any).last_processed_date) {
-      cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
+      activitiesByDungeon[hash] = Array.from(map.values());
     }
 
-    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-    if (completed.length <= dbTotalClears) {
-      continue;
-    }
-
-    completed.sort((a, b) => {
-      const ta = a.period ? new Date(a.period).getTime() : 0;
-      const tb = b.period ? new Date(b.period).getTime() : 0;
-      return ta - tb;
-    });
-
-    let newActivities = completed;
-    if (cutoffDate) {
-      newActivities = completed.filter(a => {
-        try {
-          const actDate = new Date(a.period);
-          return actDate.getTime() > cutoffDate!.getTime();
-        } catch {
-          return true;
-        }
-      });
-    }
-
-    if (newActivities.length === 0) continue;
-
-    const batchCount = Math.ceil(newActivities.length / MAX_BATCH_SIZE);
-    totalBatches += batchCount;
-    dungeonBatchCounts[dungeonHash] = batchCount;
-  }
-
-  // Initialize MemberCoordinator if we have batches to process
-  if (totalBatches > 0) {
-    const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.membershipId);
-    const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
+    // Calculate total batches across all dungeons
+    let totalBatches = 0;
+    const dungeonBatchCounts: Record<string, number> = {};
     
-    await coordinator.fetch('https://internal/init', {
-      method: 'POST',
-      body: JSON.stringify({
-        membershipId: job.membershipId,
-        membershipType: job.membershipType,
-        clanId: job.clanId,
-        totalBatches,
-        dungeonBatches: dungeonBatchCounts
-      }),
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
+    for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+      const dungeonHash = dungeon.hash;
+      const activities = activitiesByDungeon[dungeonHash] || [];
+      if (activities.length === 0) continue;
 
-  // Queue per-dungeon jobs
-  let totalQueued = 0;
-  let batchesQueued = 0;
+      const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
+      if (completed.length === 0) continue;
 
-  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-    const dungeonHash = dungeon.hash;
-    const activities = activitiesByDungeon[dungeonHash] || [];
+      // Check DB for previous stats
+      const prevRow = await env.DB.prepare(`
+        SELECT last_processed_date, total_clears
+        FROM member_dungeon_stats
+        WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
+      `).bind(job.clanId, job.membershipId, dungeonHash).first();
 
-    if (activities.length === 0) continue;
+      let cutoffDate: Date | null = null;
+      if (prevRow && (prevRow as any).last_processed_date) {
+        cutoffDate = new Date((prevRow as any).last_processed_date);
+      } else if (job.lastProcessedDate) {
+        cutoffDate = new Date(job.lastProcessedDate);
+      }
 
-    // Filter to completed only
-    const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
-    if (completed.length === 0) continue;
+      const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    // Check DB for previous stats
-    const prevRow = await env.DB.prepare(`
-      SELECT last_processed_date, total_clears
-      FROM member_dungeon_stats
-      WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
-    `).bind(job.clanId, job.membershipId, dungeonHash).first();
+      if (completed.length <= dbTotalClears) {
+        continue;
+      }
 
-    let cutoffDate: Date | null = null;
-    if (prevRow && (prevRow as any).last_processed_date) {
-      cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
-    }
-
-    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-    // Skip if no new activities
-    if (completed.length <= dbTotalClears) {
-      continue;
-    }
-
-    // Sort by period ascending (oldest first)
-    completed.sort((a, b) => {
-      const ta = a.period ? new Date(a.period).getTime() : 0;
-      const tb = b.period ? new Date(b.period).getTime() : 0;
-      return ta - tb;
-    });
-
-    // Filter to new activities after cutoff
-    let newActivities = completed;
-    if (cutoffDate) {
-      newActivities = completed.filter(a => {
-        try {
-          const actDate = new Date(a.period);
-          return actDate.getTime() > cutoffDate!.getTime();
-        } catch {
-          return true;
-        }
+      completed.sort((a, b) => {
+        const ta = a.period ? new Date(a.period).getTime() : 0;
+        const tb = b.period ? new Date(b.period).getTime() : 0;
+        return ta - tb;
       });
+
+      let newActivities = completed;
+      if (cutoffDate) {
+        newActivities = completed.filter(a => {
+          try {
+            const actDate = new Date(a.period);
+            return actDate.getTime() > cutoffDate!.getTime();
+          } catch {
+            return true;
+          }
+        });
+      }
+
+      if (newActivities.length === 0) continue;
+
+      const batchCount = Math.ceil(newActivities.length / MAX_BATCH_SIZE);
+      totalBatches += batchCount;
+      dungeonBatchCounts[dungeonHash] = batchCount;
     }
 
-    if (newActivities.length === 0) {
-      continue;
-    }
-
-    // Prepare activities payload
-    const activitiesPayload = newActivities.map(a => ({
-      instanceId: a.activityDetails?.instanceId || a.instanceId,
-      date: a.period,
-      characterId: (a as any).characterId,
-    }));
-
-    // Split into batches
-    const batches: any[][] = [];
-    for (let i = 0; i < activitiesPayload.length; i += MAX_BATCH_SIZE) {
-      batches.push(activitiesPayload.slice(i, i + MAX_BATCH_SIZE));
-    }
-
-    // Queue each batch
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-      await env.STATS_QUEUE.send({
-        clanId: job.clanId,
-        membershipId: job.membershipId,
-        membershipType: job.membershipType,
-        dungeonHash,
-        activities: batches[batchIndex],
-        jobId: `${job.membershipId}-${dungeonHash}-${batchIndex}`,
-      });
+    // Initialize MemberCoordinator if we have batches to process
+    if (totalBatches > 0) {
+      const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.membershipId);
+      const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
       
-      totalQueued += batches[batchIndex].length;
-      totalBatches++;
+      await coordinator.fetch('https://internal/init', {
+        method: 'POST',
+        body: JSON.stringify({
+          membershipId: job.membershipId,
+          membershipType: job.membershipType,
+          clanId: job.clanId,
+          totalBatches,
+          dungeonBatches: dungeonBatchCounts
+        }),
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
 
-    console.log(`[MemberJob] Queued ${batches.length} batch(es) for ${dungeon.displayName} (${activitiesPayload.length} activities)`);
-  }
+    // Queue per-dungeon jobs
+    let totalQueued = 0;
+    let batchesQueued = 0;
 
-  await notifyRunComplete(env, job);
+    for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+      const dungeonHash = dungeon.hash;
+      const activities = activitiesByDungeon[dungeonHash] || [];
+
+      if (activities.length === 0) continue;
+
+      // Filter to completed only
+      const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
+      if (completed.length === 0) continue;
+
+      // Check DB for previous stats
+      const prevRow = await env.DB.prepare(`
+        SELECT last_processed_date, total_clears
+        FROM member_dungeon_stats
+        WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
+      `).bind(job.clanId, job.membershipId, dungeonHash).first();
+
+      let cutoffDate: Date | null = null;
+      if (prevRow && (prevRow as any).last_processed_date) {
+        cutoffDate = new Date((prevRow as any).last_processed_date);
+      } else if (job.lastProcessedDate) {
+        cutoffDate = new Date(job.lastProcessedDate);
+      }
+
+      const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
+
+      // Skip if no new activities
+      if (completed.length <= dbTotalClears) {
+        continue;
+      }
+
+      // Sort by period ascending (oldest first)
+      completed.sort((a, b) => {
+        const ta = a.period ? new Date(a.period).getTime() : 0;
+        const tb = b.period ? new Date(b.period).getTime() : 0;
+        return ta - tb;
+      });
+
+      // Filter to new activities after cutoff
+      let newActivities = completed;
+      if (cutoffDate) {
+        newActivities = completed.filter(a => {
+          try {
+            const actDate = new Date(a.period);
+            return actDate.getTime() > cutoffDate!.getTime();
+          } catch {
+            return true;
+          }
+        });
+      }
+
+      if (newActivities.length === 0) {
+        continue;
+      }
+
+      // Prepare activities payload
+      const activitiesPayload = newActivities.map(a => ({
+        instanceId: a.activityDetails?.instanceId || a.instanceId,
+        date: a.period,
+        characterId: (a as any).characterId,
+      }));
+
+      // Split into batches
+      const batches: any[][] = [];
+      for (let i = 0; i < activitiesPayload.length; i += MAX_BATCH_SIZE) {
+        batches.push(activitiesPayload.slice(i, i + MAX_BATCH_SIZE));
+      }
+
+      // Queue each batch
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+        await env.STATS_QUEUE.send({
+          clanId: job.clanId,
+          membershipId: job.membershipId,
+          membershipType: job.membershipType,
+          dungeonHash,
+          activities: batches[batchIndex],
+          jobId: `${job.membershipId}-${dungeonHash}-${batchIndex}`,
+        });
+        
+        totalQueued += batches[batchIndex].length;
+        totalBatches++;
+      }
+
+      console.log(`[MemberJob] Queued ${batches.length} batch(es) for ${dungeon.displayName} (${activitiesPayload.length} activities)`);
+    }
+
+    await notifyRunComplete(env, job);
 
   const duration = Date.now() - startTime;
   console.log(`[MemberJob] COMPLETE: ${job.displayName} | Queued: ${totalQueued} | Batches: ${totalBatches} | ${(duration/1000).toFixed(1)}s`);
