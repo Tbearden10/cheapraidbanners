@@ -717,6 +717,8 @@ export default {
       if (url.pathname === '/admin/refresh-member' && request.method === 'POST') {
         const body = await request.json().catch(() => ({} as any));
         const membershipId = String(body.membershipId ?? '');
+        const membershipType = body.membershipType ? Number(body.membershipType) : null;
+        const displayName = body.displayName ? String(body.displayName) : null;
         const force = !!body.force;
         const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
 
@@ -724,22 +726,27 @@ export default {
           return jsonResponse({ error: 'membershipId is required' }, 400, request, env);
         }
 
+        if (!membershipType) {
+          return jsonResponse({ error: 'membershipType is required for fresh users (1=Xbox, 2=PSN, 3=Steam, etc.)' }, 400, request, env);
+        }
+
         const results: Record<string, unknown> = { membershipId };
 
-        // Get member info from DB
+        // Try to get member info from DB (for existing members)
         const member = await env.DB.prepare(`
           SELECT membership_id, membership_type, display_name, is_active
           FROM clan_members
           WHERE clan_id = ? AND membership_id = ?
         `).bind(clanId, membershipId).first();
 
-        if (!member) {
-          return jsonResponse({ error: 'Member not found' }, 404, request, env);
-        }
-
-        if (!(member as any).is_active) {
+        // If member exists in DB, verify they're active
+        if (member && !(member as any).is_active) {
           return jsonResponse({ error: 'Member is not active' }, 400, request, env);
         }
+
+        // Use DB data if available, otherwise use provided parameters
+        const finalMembershipType = member ? Number((member as any).membership_type) : membershipType;
+        const finalDisplayName = member ? (member as any).display_name : (displayName || `User-${membershipId.slice(0, 8)}`);
 
         // If force is requested, clear existing stats for this member only
         if (force) {
@@ -791,9 +798,9 @@ export default {
 
           await env.MEMBER_STATS_QUEUE.send({
             clanId,
-            membershipId: (member as any).membership_id,
-            membershipType: Number((member as any).membership_type),
-            displayName: (member as any).display_name,
+            membershipId: membershipId,
+            membershipType: finalMembershipType,
+            displayName: finalDisplayName,
             lastProcessedDate,
             runId,
           });
@@ -801,7 +808,10 @@ export default {
           results.queued = true;
           results.runId = runId;
           results.force = force;
-          console.log(`[RefreshMember] Queued member ${(member as any).display_name} (${membershipId}) with runId=${runId}, force=${force}`);
+          results.membershipType = finalMembershipType;
+          results.displayName = finalDisplayName;
+          results.isNewUser = !member;
+          console.log(`[RefreshMember] Queued member ${finalDisplayName} (${membershipId}) with runId=${runId}, force=${force}, isNewUser=${!member}`);
         } catch (err) {
           results.queued = false;
           results.queueError = (err as any)?.message ?? String(err);

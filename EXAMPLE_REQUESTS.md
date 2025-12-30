@@ -12,7 +12,22 @@ export API_TOKEN="your_api_token_here"
 
 ## Examples
 
-### 1. Refresh a single member (incremental update)
+### 1. Refresh a fresh user (not in database)
+
+This will process all activities for a user who hasn't been synced yet:
+
+```bash
+curl -X POST http://localhost:8787/admin/refresh-member \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "membershipId": "4611686018467765794",
+    "membershipType": 3,
+    "displayName": "PlayerName#1234"
+  }'
+```
+
+### 2. Refresh an existing member (incremental update)
 
 This will only process new activities since the last refresh:
 
@@ -21,11 +36,12 @@ curl -X POST http://localhost:8787/admin/refresh-member \
   -H "Authorization: Bearer $API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "membershipId": "4611686018467765794"
+    "membershipId": "4611686018467765794",
+    "membershipType": 3
   }'
 ```
 
-### 2. Refresh a single member with force flag
+### 3. Refresh a member with force flag
 
 This will clear all existing stats for the member and reprocess everything:
 
@@ -35,11 +51,12 @@ curl -X POST http://localhost:8787/admin/refresh-member \
   -H "Content-Type: application/json" \
   -d '{
     "membershipId": "4611686018467765794",
+    "membershipType": 3,
     "force": true
   }'
 ```
 
-### 3. Refresh a single member with custom clan ID
+### 4. Refresh a member with custom clan ID
 
 ```bash
 curl -X POST http://localhost:8787/admin/refresh-member \
@@ -47,11 +64,12 @@ curl -X POST http://localhost:8787/admin/refresh-member \
   -H "Content-Type: application/json" \
   -d '{
     "membershipId": "4611686018467765794",
+    "membershipType": 3,
     "clanId": "5335552"
   }'
 ```
 
-### 4. Refresh all members (existing endpoint)
+### 5. Refresh all members (existing endpoint)
 
 ```bash
 curl -X POST http://localhost:8787/admin/refresh \

@@ -53,13 +53,15 @@ Refresh all clan members and/or statistics.
 
 ## POST /admin/refresh-member
 
-Refresh statistics for a single clan member. This is useful for users with very large clear counts that may cause issues when refreshing all members.
+Refresh statistics for a single clan member. This is useful for users with very large clear counts that may cause issues when refreshing all members. **Now supports fresh users not yet in the database.**
 
 ### Request Body
 
 ```json
 {
   "membershipId": "4611686018467765794",  // Required
+  "membershipType": 3,                    // Required (1=Xbox, 2=PSN, 3=Steam, 4=Blizzard, 5=Stadia, 6=EGS, 10=Demon, 254=BungieNext)
+  "displayName": "PlayerName#1234",       // Optional (used for fresh users)
   "force": true|false,                    // Optional, defaults to false
   "clanId": "5335552"                     // Optional, defaults to env.BUNGIE_CLAN_ID
 }
@@ -68,6 +70,8 @@ Refresh statistics for a single clan member. This is useful for users with very 
 ### Parameters
 
 - **membershipId** (string, required): The Bungie membership ID of the member to refresh
+- **membershipType** (number, required): The platform membership type (1=Xbox, 2=PSN, 3=Steam, etc.)
+- **displayName** (string, optional): Display name for the member (only needed for fresh users not in DB)
 - **force** (boolean, optional): When `true`, clears existing stats for this member before sync. Defaults to `false`.
 - **clanId** (string, optional): Target clan ID. Defaults to configured clan ID.
 
@@ -83,7 +87,10 @@ Refresh statistics for a single clan member. This is useful for users with very 
     "cleared": true,
     "queued": true,
     "runId": "run-single-1735554321123-a1b2c3",
-    "force": true
+    "force": true,
+    "membershipType": 3,
+    "displayName": "PlayerName#1234",
+    "isNewUser": false
   }
 }
 ```
@@ -97,10 +104,10 @@ Refresh statistics for a single clan member. This is useful for users with very 
 }
 ```
 
-**404 Not Found** - Member not found:
+**400 Bad Request** - Missing membershipType:
 ```json
 {
-  "error": "Member not found"
+  "error": "membershipType is required for fresh users (1=Xbox, 2=PSN, 3=Steam, etc.)"
 }
 ```
 
@@ -113,24 +120,39 @@ Refresh statistics for a single clan member. This is useful for users with very 
 
 ### Example Usage
 
-**Refresh a single member with force:**
+**Refresh a fresh user (not in database):**
 ```bash
 curl -X POST https://api.cheapraidbanners.com/admin/refresh-member \
   -H "Authorization: Bearer YOUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "membershipId": "4611686018467765794",
+    "membershipType": 3,
+    "displayName": "PlayerName#1234",
     "force": true
   }'
 ```
 
-**Refresh a single member incrementally:**
+**Refresh an existing member with force:**
 ```bash
 curl -X POST https://api.cheapraidbanners.com/admin/refresh-member \
   -H "Authorization: Bearer YOUR_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "membershipId": "4611686018467765794"
+    "membershipId": "4611686018467765794",
+    "membershipType": 3,
+    "force": true
+  }'
+```
+
+**Refresh an existing member incrementally:**
+```bash
+curl -X POST https://api.cheapraidbanners.com/admin/refresh-member \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "membershipId": "4611686018467765794",
+    "membershipType": 3
   }'
 ```
 
