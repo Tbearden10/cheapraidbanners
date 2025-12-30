@@ -67,6 +67,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
           const instanceId = activity.activityDetails?.instanceId || activity.instanceId;
           if (!instanceId) {
             // Skip activities without instanceId - can't deduplicate or fetch PGCR later
+            // Note: break (not continue) to match original behavior - stops checking remaining dungeons
             break;
           }
           
