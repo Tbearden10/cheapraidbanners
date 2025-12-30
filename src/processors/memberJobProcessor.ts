@@ -118,18 +118,15 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       cutoffDate = new Date(job.lastProcessedDate);
     }
 
-    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-    if (completed.length <= dbTotalClears) {
-      continue;
-    }
-
+    // Sort by period ascending (oldest first)
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
       const tb = b.period ? new Date(b.period).getTime() : 0;
       return ta - tb;
     });
 
+    // Filter to new activities after cutoff date
+    // If no cutoff date exists, process all activities (first-time processing)
     let newActivities = completed;
     if (cutoffDate) {
       newActivities = completed.filter(a => {
@@ -142,6 +139,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       });
     }
 
+    // Skip if no new activities based on date filtering
     if (newActivities.length === 0) continue;
 
     const batchCount = Math.ceil(newActivities.length / MAX_BATCH_SIZE);
@@ -195,13 +193,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       cutoffDate = new Date(job.lastProcessedDate);
     }
 
-    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-    // Skip if no new activities
-    if (completed.length <= dbTotalClears) {
-      continue;
-    }
-
     // Sort by period ascending (oldest first)
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
@@ -209,7 +200,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       return ta - tb;
     });
 
-    // Filter to new activities after cutoff
+    // Filter to new activities after cutoff date
+    // If no cutoff date exists, process all activities (first-time processing)
     let newActivities = completed;
     if (cutoffDate) {
       newActivities = completed.filter(a => {
@@ -222,6 +214,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       });
     }
 
+    // Skip if no new activities based on date filtering
     if (newActivities.length === 0) {
       continue;
     }
