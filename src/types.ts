@@ -148,4 +148,5 @@ export interface StatsQueueJob {
   jobId: string;
   batchIndex?: number;
   totalBatches?: number;
+  coordinatorId?: string;
 }
