@@ -97,7 +97,6 @@ export interface ClanMemberRow {
   is_active: number;
   created_at?: number;
   updated_at?: number;
-  last_processed_date?: string | null;
 }
 
 export interface MemberDungeonStatsRow {

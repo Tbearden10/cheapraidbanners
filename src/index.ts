@@ -737,7 +737,7 @@ export default {
 
         // Fetch member from DB to get details
         const member = await env.DB.prepare(`
-          SELECT membership_id, membership_type, display_name, last_processed_date
+          SELECT membership_id, membership_type, display_name
           FROM clan_members
           WHERE clan_id = ? AND membership_id = ? AND is_active = 1
         `).bind(clanId, membershipId).first();
