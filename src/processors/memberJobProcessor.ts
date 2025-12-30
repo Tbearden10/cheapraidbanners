@@ -62,6 +62,18 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     for (const activity of activitiesByChar[charId]) {
       const refId = String(activity?.activityDetails?.referenceId || '');
       
+      // Check for duplicate reference IDs across dungeons
+      let matchingDungeons: string[] = [];
+      for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+        if (dungeon.referenceIds.includes(refId)) {
+          matchingDungeons.push(dungeon.displayName);
+        }
+      }
+      
+      if (matchingDungeons.length > 1) {
+        console.warn(`[MemberJob] ⚠️  Reference ID ${refId} matches multiple dungeons: ${matchingDungeons.join(', ')} - using first match only`);
+      }
+      
       for (const dungeon of ACTIVITY_REFERENCE_MAP) {
         if (dungeon.referenceIds.includes(refId)) {
           const instanceId = activity.activityDetails?.instanceId || activity.instanceId;
