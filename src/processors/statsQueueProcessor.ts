@@ -18,14 +18,24 @@ const DELAY_MS = 50;
 function determineClearType(pgcr: any, period: string): boolean {
   const timestamp = Date.parse(period);
   
+  // Count instances with more than 3 players as valid full clears
+  // Dungeons are designed for 3 players, but some instances may have more players
+  // due to special modes, bugs, or other circumstances - these should still count
+  const playerCount = (pgcr.entries || []).length;
+  const hasMultiplePlayers = playerCount > 3;
+  
   if (timestamp >= HAUNTED_START_MS) {
-    return Boolean(pgcr.activityWasStartedFromBeginning);
+    // If there are more than 3 players, be more lenient and count as full clear
+    // as long as the activity was completed (we know it was since it's in completed list)
+    return Boolean(pgcr.activityWasStartedFromBeginning) || hasMultiplePlayers;
   }
   if (timestamp < BEYOND_LIGHT_START_MS) {
-    return pgcr.startingPhaseIndex === 0;
+    // For older activities, also be lenient with player count
+    return pgcr.startingPhaseIndex === 0 || hasMultiplePlayers;
   }
   if (timestamp >= WITCH_QUEEN_START_MS) {
-    return Boolean(pgcr.activityWasStartedFromBeginning);
+    // For Witch Queen era, also be lenient with player count
+    return Boolean(pgcr.activityWasStartedFromBeginning) || hasMultiplePlayers;
   }
   return true;
 }
