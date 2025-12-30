@@ -718,7 +718,7 @@ export default {
         const body = await request.json().catch(() => ({} as any));
         const membershipId = body.membershipId;
         const force = !!body.force;
-        const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
+        const clanId = env.BUNGIE_CLAN_ID; // Always use the configured clan ID
 
         if (!membershipId) {
           return jsonResponse({ error: 'membershipId is required' }, 400, request, env);

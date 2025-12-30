@@ -241,7 +241,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       });
       
       totalQueued += batches[batchIndex].length;
-      totalBatches++;
+      batchesQueued++;
     }
 
     console.log(`[MemberJob] Queued ${batches.length} batch(es) for ${dungeon.displayName} (${activitiesPayload.length} activities)`);
@@ -250,7 +250,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   await notifyRunComplete(env, job);
 
   const duration = Date.now() - startTime;
-  console.log(`[MemberJob] COMPLETE: ${job.displayName} | Queued: ${totalQueued} | Batches: ${totalBatches} | ${(duration/1000).toFixed(1)}s`);
+  console.log(`[MemberJob] COMPLETE: ${job.displayName} | Queued: ${totalQueued} | Batches: ${batchesQueued} | ${(duration/1000).toFixed(1)}s`);
 }
 
 async function notifyRunComplete(env: Env, job: MemberJob): Promise<void> {
