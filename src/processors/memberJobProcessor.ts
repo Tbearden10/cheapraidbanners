@@ -1,6 +1,6 @@
 // ============================================================================
 // FILE: src/processors/memberJobProcessor.ts
-// Clean member job processor with MemberCoordinator for batch aggregation
+// FIXED: Properly handle multi-player dungeons by preferring completed status
 // ============================================================================
 
 import type { Env, MemberJob } from '../types';
@@ -47,12 +47,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   
   console.log(`[MemberJob] Fetched ${totalActivitiesFetched} activities for ${job.displayName}`);
 
-  // Group by dungeon hash with inline deduplication
-  // Use Maps to dedupe as we go - handles character switching during runs
-  // When a user switches characters mid-dungeon:
-  //   - Character 1 may show run as "non-completed" (left early)
-  //   - Character 2 shows same run as "completed" (finished it)
-  // We track by instanceId and always prefer the completed version
+  // Group by dungeon hash with SMART deduplication
+  // Key insight: When players join mid-activity, their character shows completed=0
+  // but the activity was still completed. We should count it if ANY character shows completed=1
   const activitiesByDungeon: Record<string, Map<string, any>> = {};
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
     activitiesByDungeon[dungeon.hash] = new Map<string, any>();
@@ -78,8 +75,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
         if (dungeon.referenceIds.includes(refId)) {
           const instanceId = activity.activityDetails?.instanceId || activity.instanceId;
           if (!instanceId) {
-            // Skip activities without instanceId - can't deduplicate or fetch PGCR later
-            // Note: break (not continue) to match original behavior - stops checking remaining dungeons
             break;
           }
           
@@ -91,15 +86,21 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
             // First time seeing this instance
             dungeonMap.set(instanceId, actWithChar);
           } else {
-            // Duplicate instance - prefer completed over non-completed
+            // CRITICAL FIX: Always prefer completed over non-completed
+            // This handles cases where:
+            // 1. Player switched characters during run (one shows completed, one doesn't)
+            // 2. Player joined late (their character shows not completed)
+            // 3. Fireteam had multiple players (some joined late)
             const existingCompleted = !!(existing?.values?.completed?.basic?.value === 1);
             const newCompleted = !!(actWithChar?.values?.completed?.basic?.value === 1);
             
-            if (!existingCompleted && newCompleted) {
+            if (newCompleted && !existingCompleted) {
               // Replace non-completed with completed version
+              console.log(`[MemberJob] Replacing non-completed instance ${instanceId} with completed version`);
               dungeonMap.set(instanceId, actWithChar);
             }
             // If both completed or both not completed, keep existing (first seen)
+            // If existing is completed and new is not, keep existing (don't downgrade)
           }
           break;
         }
@@ -136,10 +137,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    // Log comparison per dungeon
     console.log(`[MemberJob:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
 
-    // Do count check first per dungeon
     if (completed.length <= dbTotalClears) {
       console.log(`[MemberJob:${dungeon.displayName}] Skipping - no new activities (fetched <= DB)`);
       continue;
@@ -223,10 +222,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    // Log comparison per dungeon
     console.log(`[MemberJob:Queue:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
 
-    // Do count check first per dungeon
     if (completed.length <= dbTotalClears) {
       console.log(`[MemberJob:Queue:${dungeon.displayName}] Skipping - no new activities (fetched <= DB)`);
       continue;
