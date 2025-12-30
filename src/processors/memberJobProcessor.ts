@@ -321,7 +321,7 @@ async function fetchAllActivities(
   const out: Record<string, any[]> = {};
   for (const id of characterIds) out[id] = [];
 
-  const modes = [82, 2]; // Dungeon, Story
+  const modes = [82, 7, 2]; // Dungeon, AllPvE, Story
 
   async function fetchAllPagesForCharacter(charId: string, mode: number) {
     const pageSize = 250;
