@@ -128,11 +128,10 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
     `).bind(job.clanId, job.membershipId, dungeonHash).first();
 
+    // Only use cutoff date if we have processed this specific dungeon before
     let cutoffDate: Date | null = null;
     if (prevRow && (prevRow as any).last_processed_date) {
       cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
     }
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
@@ -210,11 +209,10 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
     `).bind(job.clanId, job.membershipId, dungeonHash).first();
 
+    // Only use cutoff date if we have processed this specific dungeon before
     let cutoffDate: Date | null = null;
     if (prevRow && (prevRow as any).last_processed_date) {
       cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
     }
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
