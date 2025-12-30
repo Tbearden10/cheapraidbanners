@@ -778,7 +778,10 @@ export default {
                   mode,
                   pageSize,
                   env.BUNGIE_API_KEY
-                ).catch(() => []);
+                ).catch((err) => {
+                  console.warn(`[Debug] Failed to fetch activities for char ${char.characterId} page ${page}:`, err);
+                  return [];
+                });
 
                 if (activities && activities.length > 0) {
                   activitiesByChar[char.characterId].push(...activities);
