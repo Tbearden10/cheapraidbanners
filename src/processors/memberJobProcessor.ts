@@ -47,10 +47,15 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   
   console.log(`[MemberJob] Fetched ${totalActivitiesFetched} activities for ${job.displayName}`);
 
-  // Group by dungeon hash
-  const activitiesByDungeon: Record<string, any[]> = {};
+  // Group by dungeon hash with inline deduplication
+  // Use Maps to dedupe as we go - handles character switching during runs
+  // When a user switches characters mid-dungeon:
+  //   - Character 1 may show run as "non-completed" (left early)
+  //   - Character 2 shows same run as "completed" (finished it)
+  // We track by instanceId and always prefer the completed version
+  const activitiesByDungeon: Record<string, Map<string, any>> = {};
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-    activitiesByDungeon[dungeon.hash] = [];
+    activitiesByDungeon[dungeon.hash] = new Map<string, any>();
   }
 
   for (const charId of Object.keys(activitiesByChar)) {
@@ -59,37 +64,31 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       
       for (const dungeon of ACTIVITY_REFERENCE_MAP) {
         if (dungeon.referenceIds.includes(refId)) {
-          activitiesByDungeon[dungeon.hash].push({
-            ...activity,
-            characterId: charId,
-          });
+          const instanceId = activity.activityDetails?.instanceId || activity.instanceId;
+          if (!instanceId) break;
+          
+          const dungeonMap = activitiesByDungeon[dungeon.hash];
+          const actWithChar = { ...activity, characterId: charId };
+          const existing = dungeonMap.get(instanceId);
+          
+          if (!existing) {
+            // First time seeing this instance
+            dungeonMap.set(instanceId, actWithChar);
+          } else {
+            // Duplicate instance - prefer completed over non-completed
+            const existingCompleted = !!(existing?.values?.completed?.basic?.value === 1);
+            const newCompleted = !!(actWithChar?.values?.completed?.basic?.value === 1);
+            
+            if (!existingCompleted && newCompleted) {
+              // Replace non-completed with completed version
+              dungeonMap.set(instanceId, actWithChar);
+            }
+            // If both completed or both not completed, keep existing (first seen)
+          }
           break;
         }
       }
     }
-  }
-
-  // Dedupe per dungeon
-  for (const hash of Object.keys(activitiesByDungeon)) {
-    const map = new Map<string, any>();
-    
-    for (const act of activitiesByDungeon[hash]) {
-      const id = act.activityDetails?.instanceId || act.instanceId;
-      if (!id) continue;
-      
-      const existing = map.get(id);
-      if (!existing) {
-        map.set(id, act);
-      } else {
-        // Prefer completed activities
-        const existingCompleted = !!(existing?.values?.completed?.basic?.value === 1);
-        const newCompleted = !!(act?.values?.completed?.basic?.value === 1);
-        if (!existingCompleted && newCompleted) {
-          map.set(id, act);
-        }
-      }
-    }
-    activitiesByDungeon[hash] = Array.from(map.values());
   }
 
   // Calculate total batches across all dungeons
@@ -98,7 +97,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
     const dungeonHash = dungeon.hash;
-    const activities = activitiesByDungeon[dungeonHash] || [];
+    const activitiesMap = activitiesByDungeon[dungeonHash];
+    const activities = activitiesMap ? Array.from(activitiesMap.values()) : [];
     if (activities.length === 0) continue;
 
     const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
@@ -173,7 +173,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
     const dungeonHash = dungeon.hash;
-    const activities = activitiesByDungeon[dungeonHash] || [];
+    const activitiesMap = activitiesByDungeon[dungeonHash];
+    const activities = activitiesMap ? Array.from(activitiesMap.values()) : [];
 
     if (activities.length === 0) continue;
 
