@@ -727,13 +727,13 @@ export default {
       if (url.pathname === '/admin/refresh-member' && request.method === 'POST') {
         const body = await request.json().catch(() => ({} as any));
         const membershipId = String(body.membershipId || '');
-        const membershipType = Number(body.membershipType || 0);
+        const membershipType = Number(body.membershipType);
         const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
 
-        if (!membershipId || !membershipType) {
+        if (!membershipId || isNaN(membershipType) || membershipType < 0) {
           return jsonResponse({ 
             success: false, 
-            error: 'membershipId and membershipType are required' 
+            error: 'membershipId and valid membershipType are required' 
           }, 400, request, env);
         }
 
@@ -770,7 +770,7 @@ export default {
             membershipId,
             membershipType,
             displayName: member.display_name,
-            lastProcessedDate: null, // Force reprocess all activities
+            lastProcessedDate: null, // null = reprocess all activities from beginning
             runId: `manual-refresh-${Date.now()}`,
           } as MemberJob);
 
@@ -782,7 +782,7 @@ export default {
             membershipType,
             displayName: member.display_name,
             queued: true,
-            message: 'Member stats refresh queued. Check logs for diagnostic output including pagination, deduplication, and per-dungeon activity counts.'
+            message: 'Member stats refresh queued. Check application logs for detailed diagnostic information.'
           }, 200, request, env);
         } catch (err) {
           console.error('[Admin] Failed to queue member job:', err);
