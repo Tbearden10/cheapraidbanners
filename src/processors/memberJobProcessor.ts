@@ -332,9 +332,10 @@ async function fetchAllActivities(
 
   async function fetchAllPagesForCharacter(charId: string, mode: number) {
     const pageSize = 250;
+    const maxPages = 20; // Bungie API typically limits to ~1000 activities, but we'll try up to 5000 (20 pages)
     let page = 0;
 
-    while (true) {
+    while (page < maxPages) {
       const activities: any[] = await withRateLimit(
         () =>
           fetchActivitiesForCharacter(
@@ -356,7 +357,18 @@ async function fetchAllActivities(
       if (!activities || activities.length < pageSize) break;
 
       page++;
+      
+      // Log if we're fetching a lot of pages (potential API limit scenario)
+      if (page >= 4) {
+        console.log(`[MemberJob] Fetching page ${page} for character ${charId} mode ${mode} (${out[charId].length} activities so far)`);
+      }
+      
       await sleep(200);
+    }
+    
+    // Warn if we hit the max page limit (likely hit API limit)
+    if (page >= maxPages) {
+      console.warn(`[MemberJob] ⚠️  Hit max page limit (${maxPages}) for character ${charId} mode ${mode}. User may have more activities than can be fetched. Total fetched: ${out[charId].length}`);
     }
   }
 
