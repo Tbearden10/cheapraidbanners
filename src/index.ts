@@ -723,6 +723,75 @@ export default {
         return jsonResponse({ success: true, clanId }, 200, request, env);
       }
 
+      // POST /admin/sync-user - Update stats for a single user
+      if (url.pathname === '/admin/sync-user' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({} as any));
+        const membershipId = String(body.membershipId || '');
+        const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
+
+        if (!membershipId) {
+          return jsonResponse({ error: 'membershipId is required' }, 400, request, env);
+        }
+
+        console.log(`[AdminSyncUser] START: membershipId=${membershipId} clanId=${clanId}`);
+
+        // Fetch member from DB to get details
+        const member = await env.DB.prepare(`
+          SELECT membership_id, membership_type, display_name, last_processed_date
+          FROM clan_members
+          WHERE clan_id = ? AND membership_id = ? AND is_active = 1
+        `).bind(clanId, membershipId).first();
+
+        if (!member) {
+          return jsonResponse({ 
+            error: 'Member not found or inactive',
+            membershipId 
+          }, 404, request, env);
+        }
+
+        // Get last processed date from stats
+        const prevRow = await env.DB.prepare(`
+          SELECT MAX(last_processed_date) AS last_processed_date
+          FROM member_dungeon_stats
+          WHERE clan_id = ? AND membership_id = ?
+        `).bind(clanId, membershipId).first();
+
+        const lastProcessedDate = (prevRow ? (prevRow as any).last_processed_date ?? null : null);
+
+        // Create a unique run ID for this single-user sync
+        const runId = `single-user-${membershipId}-${Date.now()}`;
+
+        try {
+          // Queue the member for processing
+          await env.MEMBER_STATS_QUEUE.send({
+            clanId,
+            membershipId: (member as any).membership_id,
+            membershipType: (member as any).membership_type,
+            displayName: (member as any).display_name,
+            lastProcessedDate,
+            runId,
+          });
+
+          console.log(`[AdminSyncUser] Queued member for processing: ${(member as any).display_name}`);
+
+          return jsonResponse({ 
+            success: true,
+            message: 'User queued for stats update',
+            membershipId,
+            displayName: (member as any).display_name,
+            lastProcessedDate,
+            runId,
+          }, 200, request, env);
+        } catch (err) {
+          console.error(`[AdminSyncUser] Failed to queue member:`, err);
+          return jsonResponse({ 
+            error: 'Failed to queue user for processing',
+            membershipId,
+            details: (err as any)?.message ?? String(err)
+          }, 500, request, env);
+        }
+      }
+
       // 404 - Not Found
       return jsonResponse({ error: 'Not found' }, 404, request, env);
       
