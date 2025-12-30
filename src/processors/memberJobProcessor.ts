@@ -18,20 +18,21 @@ const MAX_BATCH_SIZE = 30;
 
 export async function processMemberJob(env: Env, job: MemberJob): Promise<void> {
   const startTime = Date.now();
-  console.log(`[MemberJob] START: ${job.displayName}`);
+  console.log(`[MemberJob] START: ${job.displayName} (${job.membershipId})`);
 
-  // Fetch characters
-  const characters = await fetchCharactersForMember(
-    job.membershipId,
-    job.membershipType,
-    env.BUNGIE_API_KEY
-  );
+  try {
+    // Fetch characters
+    const characters = await fetchCharactersForMember(
+      job.membershipId,
+      job.membershipType,
+      env.BUNGIE_API_KEY
+    );
 
-  if (!characters || characters.length === 0) {
-    console.log(`[MemberJob] No characters found for ${job.displayName}`);
-    await notifyRunComplete(env, job);
-    return;
-  }
+    if (!characters || characters.length === 0) {
+      console.log(`[MemberJob] No characters found for ${job.displayName}`);
+      await notifyRunComplete(env, job);
+      return;
+    }
 
   // Fetch all activities
   const activitiesByChar = await fetchAllActivities(
@@ -261,6 +262,16 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
   const duration = Date.now() - startTime;
   console.log(`[MemberJob] COMPLETE: ${job.displayName} | Queued: ${totalQueued} | Batches: ${totalBatches} | ${(duration/1000).toFixed(1)}s`);
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    console.error(`[MemberJob] ERROR: ${job.displayName} (${job.membershipId}) failed after ${(duration/1000).toFixed(1)}s`, error);
+    
+    // Still notify RunTracker that this member is done (even if it failed)
+    await notifyRunComplete(env, job);
+    
+    // Re-throw to let queue handler mark as failed and potentially retry
+    throw error;
+  }
 }
 
 async function notifyRunComplete(env: Env, job: MemberJob): Promise<void> {

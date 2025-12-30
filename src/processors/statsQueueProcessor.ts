@@ -111,97 +111,105 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
   const startTime = Date.now();
   console.log(`[StatsQueue] Processing ${job.activities.length} PGCRs (${job.jobId})`);
 
-  let fullClearsFound = 0;
-  let totalPlaytime = 0;
-  let latestActivityDate: string | null = null;
-  let successCount = 0;
+  try {
+    let fullClearsFound = 0;
+    let totalPlaytime = 0;
+    let latestActivityDate: string | null = null;
+    let successCount = 0;
 
-  // Process in batches of 30 (matching statsProcessor.ts)
-  for (let i = 0; i < job.activities.length; i += PGCR_BATCH_SIZE) {
-    const batch = job.activities.slice(i, Math.min(i + PGCR_BATCH_SIZE, job.activities.length));
-    
-    // Fetch batch concurrently using Promise.allSettled
-    const batchResults = await Promise.allSettled(
-      batch.map(async (activity) => {
-        const pgcr = await fetchPGCR(activity.instanceId, env.BUNGIE_API_KEY);
-        
-        if (!pgcr) return null;
-        
-        return {
-          isFullClear: determineClearType(pgcr, activity.date || ''),
-          playtime: extractPlaytime(pgcr, job.membershipId),
-          date: activity.date,
-        };
-      })
-    );
-    
-    // Aggregate batch results
-    for (const result of batchResults) {
-      if (result.status === 'fulfilled' && result.value) {
-        successCount++;
-        if (result.value.isFullClear) fullClearsFound++;
-        totalPlaytime += result.value.playtime;
-        if (result.value.date && (!latestActivityDate || result.value.date > latestActivityDate)) {
-          latestActivityDate = result.value.date;
+    // Process in batches of 30 (matching statsProcessor.ts)
+    for (let i = 0; i < job.activities.length; i += PGCR_BATCH_SIZE) {
+      const batch = job.activities.slice(i, Math.min(i + PGCR_BATCH_SIZE, job.activities.length));
+      
+      // Fetch batch concurrently using Promise.allSettled
+      const batchResults = await Promise.allSettled(
+        batch.map(async (activity) => {
+          const pgcr = await fetchPGCR(activity.instanceId, env.BUNGIE_API_KEY);
+          
+          if (!pgcr) return null;
+          
+          return {
+            isFullClear: determineClearType(pgcr, activity.date || ''),
+            playtime: extractPlaytime(pgcr, job.membershipId),
+            date: activity.date,
+          };
+        })
+      );
+      
+      // Aggregate batch results
+      for (const result of batchResults) {
+        if (result.status === 'fulfilled' && result.value) {
+          successCount++;
+          if (result.value.isFullClear) fullClearsFound++;
+          totalPlaytime += result.value.playtime;
+          if (result.value.date && (!latestActivityDate || result.value.date > latestActivityDate)) {
+            latestActivityDate = result.value.date;
+          }
         }
       }
-    }
-    
-    // Delay between batches (matching statsProcessor.ts)
-    if (i + PGCR_BATCH_SIZE < job.activities.length) {
-      await new Promise(resolve => setTimeout(resolve, DELAY_MS));
-    }
-  }
-
-  // Write to database
-  await writeIncremental(env, {
-    clanId: job.clanId,
-    membershipId: job.membershipId,
-    membershipType: job.membershipType,
-    dungeonHash: job.dungeonHash,
-    clearsDelta: successCount,
-    fullClearsDelta: fullClearsFound,
-    playtimeDelta: totalPlaytime,
-    lastProcessedDate: latestActivityDate,
-  });
-
-  // Report to MemberCoordinator if coordinatorId provided
-  if (job.coordinatorId) {
-    try {
-      const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.coordinatorId);
-      const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
       
-      const response = await coordinator.fetch('https://internal/batch', {
-        method: 'POST',
-        body: JSON.stringify({
-          batchId: job.jobId,
-          dungeonHash: job.dungeonHash,
-          batchIndex: parseInt(job.jobId.split('-').pop() || '0'),
-          clearsDelta: successCount,
-          fullClearsDelta: fullClearsFound,
-          playtimeDelta: totalPlaytime,
-          lastProcessedDate: latestActivityDate,
-        }),
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      const result = await response.json() as { complete: boolean; aggregated?: any };
-      
-      if (result.complete) {
-        console.log(`[StatsQueue] ✓ All batches complete for member ${job.membershipId}`);
-        // Optionally: trigger additional processing when all member batches are done
+      // Delay between batches (matching statsProcessor.ts)
+      if (i + PGCR_BATCH_SIZE < job.activities.length) {
+        await new Promise(resolve => setTimeout(resolve, DELAY_MS));
       }
-    } catch (err) {
-      console.warn('[StatsQueue] Failed to report to MemberCoordinator:', err);
     }
-  }
 
-  const duration = Date.now() - startTime;
-  const reqPerSec = ((successCount) / (duration / 1000)).toFixed(1);
-  const failureCount = job.activities.length - successCount;
-  
-  console.log(
-    `[StatsQueue] ✓ ${successCount}/${job.activities.length} in ${(duration/1000).toFixed(1)}s ` +
-    `(${reqPerSec} req/s) | Clears: ${fullClearsFound} | Failed: ${failureCount}`
-  );
+    // Write to database
+    await writeIncremental(env, {
+      clanId: job.clanId,
+      membershipId: job.membershipId,
+      membershipType: job.membershipType,
+      dungeonHash: job.dungeonHash,
+      clearsDelta: successCount,
+      fullClearsDelta: fullClearsFound,
+      playtimeDelta: totalPlaytime,
+      lastProcessedDate: latestActivityDate,
+    });
+
+    // Report to MemberCoordinator if coordinatorId provided
+    if (job.coordinatorId) {
+      try {
+        const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.coordinatorId);
+        const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
+        
+        const response = await coordinator.fetch('https://internal/batch', {
+          method: 'POST',
+          body: JSON.stringify({
+            batchId: job.jobId,
+            dungeonHash: job.dungeonHash,
+            batchIndex: parseInt(job.jobId.split('-').pop() || '0'),
+            clearsDelta: successCount,
+            fullClearsDelta: fullClearsFound,
+            playtimeDelta: totalPlaytime,
+            lastProcessedDate: latestActivityDate,
+          }),
+          headers: { 'Content-Type': 'application/json' },
+        });
+
+        const result = await response.json() as { complete: boolean; aggregated?: any };
+        
+        if (result.complete) {
+          console.log(`[StatsQueue] ✓ All batches complete for member ${job.membershipId}`);
+          // Optionally: trigger additional processing when all member batches are done
+        }
+      } catch (err) {
+        console.warn('[StatsQueue] Failed to report to MemberCoordinator:', err);
+      }
+    }
+
+    const duration = Date.now() - startTime;
+    const reqPerSec = ((successCount) / (duration / 1000)).toFixed(1);
+    const failureCount = job.activities.length - successCount;
+    
+    console.log(
+      `[StatsQueue] ✓ ${successCount}/${job.activities.length} in ${(duration/1000).toFixed(1)}s ` +
+      `(${reqPerSec} req/s) | Clears: ${fullClearsFound} | Failed: ${failureCount}`
+    );
+  } catch (error) {
+    const duration = Date.now() - startTime;
+    console.error(`[StatsQueue] ERROR: Job ${job.jobId} failed after ${(duration/1000).toFixed(1)}s`, error);
+    
+    // Re-throw to let queue handler mark as failed and potentially retry
+    throw error;
+  }
 }
