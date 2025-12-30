@@ -118,12 +118,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       cutoffDate = new Date(job.lastProcessedDate);
     }
 
-    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-    if (completed.length <= dbTotalClears) {
-      continue;
-    }
-
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
       const tb = b.period ? new Date(b.period).getTime() : 0;
@@ -193,13 +187,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       cutoffDate = new Date((prevRow as any).last_processed_date);
     } else if (job.lastProcessedDate) {
       cutoffDate = new Date(job.lastProcessedDate);
-    }
-
-    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-    // Skip if no new activities
-    if (completed.length <= dbTotalClears) {
-      continue;
     }
 
     // Sort by period ascending (oldest first)
