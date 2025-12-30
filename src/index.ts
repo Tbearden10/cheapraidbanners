@@ -713,6 +713,103 @@ export default {
         return jsonResponse({ success: true, results }, 200, request, env);
       }
 
+      // POST /admin/refresh-member
+      if (url.pathname === '/admin/refresh-member' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({} as any));
+        const membershipId = String(body.membershipId ?? '');
+        const force = !!body.force;
+        const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
+
+        if (!membershipId) {
+          return jsonResponse({ error: 'membershipId is required' }, 400, request, env);
+        }
+
+        const results: Record<string, unknown> = { membershipId };
+
+        // Get member info from DB
+        const member = await env.DB.prepare(`
+          SELECT membership_id, membership_type, display_name, is_active
+          FROM clan_members
+          WHERE clan_id = ? AND membership_id = ?
+        `).bind(clanId, membershipId).first();
+
+        if (!member) {
+          return jsonResponse({ error: 'Member not found' }, 404, request, env);
+        }
+
+        if (!(member as any).is_active) {
+          return jsonResponse({ error: 'Member is not active' }, 400, request, env);
+        }
+
+        // If force is requested, clear existing stats for this member only
+        if (force) {
+          try {
+            await env.DB.prepare(`DELETE FROM member_dungeon_stats WHERE clan_id = ? AND membership_id = ?`)
+              .bind(clanId, membershipId).run();
+            results.cleared = true;
+          } catch (err) {
+            results.cleared = false;
+            results.clearError = (err as any)?.message ?? String(err);
+          }
+        }
+
+        // Queue this single member for processing
+        try {
+          const runId = `run-single-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          
+          // Initialize RunTracker for this single member run
+          try {
+            const trackerId = env.RUN_TRACKER.idFromName(`run-tracker-${clanId}`);
+            const tracker = env.RUN_TRACKER.get(trackerId);
+            const res = await tracker.fetch('https://internal/init', {
+              method: 'POST',
+              body: JSON.stringify({
+                runId,
+                clanId,
+                expectedCount: 1,
+              }),
+              headers: { 'Content-Type': 'application/json' },
+            });
+
+            try {
+              await res.text();
+            } catch (e) {
+              try { res.body?.cancel(); } catch {}
+            }
+          } catch (err) {
+            console.warn('[RefreshMember] RunTracker init failed (continuing):', String(err));
+          }
+
+          // Get last processed date for this member
+          const prevRow = await env.DB.prepare(`
+            SELECT MAX(last_processed_date) AS last_processed_date
+            FROM member_dungeon_stats
+            WHERE clan_id = ? AND membership_id = ?
+          `).bind(clanId, membershipId).first();
+
+          const lastProcessedDate = force ? null : (prevRow ? (prevRow as any).last_processed_date ?? null : null);
+
+          await env.MEMBER_STATS_QUEUE.send({
+            clanId,
+            membershipId: (member as any).membership_id,
+            membershipType: Number((member as any).membership_type),
+            displayName: (member as any).display_name,
+            lastProcessedDate,
+            runId,
+          });
+
+          results.queued = true;
+          results.runId = runId;
+          results.force = force;
+          console.log(`[RefreshMember] Queued member ${(member as any).display_name} (${membershipId}) with runId=${runId}, force=${force}`);
+        } catch (err) {
+          results.queued = false;
+          results.queueError = (err as any)?.message ?? String(err);
+        }
+
+        return jsonResponse({ success: true, results }, 200, request, env);
+      }
+
       // POST /admin/recompute
       if (url.pathname === '/admin/recompute' && request.method === 'POST') {
         const body = await request.json().catch(() => ({} as any));
