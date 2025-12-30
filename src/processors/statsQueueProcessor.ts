@@ -15,70 +15,19 @@ const HAUNTED_START_MS = Date.parse('2022-05-24T17:00:00.000Z');
 const PGCR_BATCH_SIZE = 30;
 const DELAY_MS = 50;
 
-/**
- * Determines if an activity should count as a "full clear" based on Bungie's API data
- * and the time period when the activity was completed.
- * 
- * IMPORTANT: This logic must be conservative - when in doubt, check multiple indicators.
- * 
- * Timeline of Bungie API changes:
- * - Before Beyond Light (Nov 10, 2020): Use startingPhaseIndex === 0
- * - Beyond Light to Witch Queen (Nov 10, 2020 - Feb 22, 2022): startingPhaseIndex may not be reliable
- * - Witch Queen to Season of Haunted (Feb 22, 2022 - May 24, 2022): activityWasStartedFromBeginning introduced
- * - Season of Haunted onwards (May 24, 2022+): activityWasStartedFromBeginning is reliable
- */
 function determineClearType(pgcr: any, period: string): boolean {
-  if (!pgcr) return false;
-  
   const timestamp = Date.parse(period);
-  if (!Number.isFinite(timestamp)) return false;
   
-  // Season of Haunted onwards (May 24, 2022+)
-  // Use activityWasStartedFromBeginning as primary indicator
   if (timestamp >= HAUNTED_START_MS) {
-    const startedFromBeginning = Boolean(pgcr.activityWasStartedFromBeginning);
-    const startingPhase = Number(pgcr.startingPhaseIndex ?? -1);
-    
-    // Check both indicators for stronger validation
-    if (startedFromBeginning && startingPhase === 0) return true;
-    if (startedFromBeginning && startingPhase === -1) return true; // No phase info, trust the flag
-    
-    return false;
+    return Boolean(pgcr.activityWasStartedFromBeginning);
   }
-  
-  // Witch Queen to Haunted (Feb 22, 2022 - May 24, 2022)
-  // activityWasStartedFromBeginning exists but may be less reliable
+  if (timestamp < BEYOND_LIGHT_START_MS) {
+    return pgcr.startingPhaseIndex === 0;
+  }
   if (timestamp >= WITCH_QUEEN_START_MS) {
-    const startedFromBeginning = Boolean(pgcr.activityWasStartedFromBeginning);
-    const startingPhase = Number(pgcr.startingPhaseIndex ?? -1);
-    
-    // Check both if available, prefer both agreeing
-    if (startedFromBeginning && startingPhase === 0) return true;
-    if (startedFromBeginning && startingPhase === -1) return true;
-    if (!startedFromBeginning && startingPhase !== 0) return false;
-    
-    // If startingPhase is 0 but flag is false, trust the flag (it's more specific)
-    if (startingPhase === 0 && !startedFromBeginning) return false;
-    
-    return startedFromBeginning;
+    return Boolean(pgcr.activityWasStartedFromBeginning);
   }
-  
-  // Beyond Light to Witch Queen (Nov 10, 2020 - Feb 22, 2022)
-  // activityWasStartedFromBeginning doesn't exist, use startingPhaseIndex
-  if (timestamp >= BEYOND_LIGHT_START_MS) {
-    const startingPhase = Number(pgcr.startingPhaseIndex ?? -1);
-    
-    // Must start from phase 0 to be a full clear
-    if (startingPhase === 0) return true;
-    
-    // If no phase index available, we cannot determine - be conservative
-    return false;
-  }
-  
-  // Before Beyond Light (before Nov 10, 2020)
-  // Use startingPhaseIndex exclusively
-  const startingPhase = Number(pgcr.startingPhaseIndex ?? -1);
-  return startingPhase === 0;
+  return true;
 }
 
 function extractPlaytime(pgcr: any, membershipId: string): number {
@@ -166,7 +115,6 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
   let totalPlaytime = 0;
   let latestActivityDate: string | null = null;
   let successCount = 0;
-  let skippedIncomplete = 0;
 
   // Process in batches of 30 (matching statsProcessor.ts)
   for (let i = 0; i < job.activities.length; i += PGCR_BATCH_SIZE) {
@@ -179,21 +127,10 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
         
         if (!pgcr) return null;
         
-        // Find the member's entry in the PGCR to verify completion
-        const memberEntry = (pgcr.entries || []).find((e: any) => 
-          e?.player?.destinyUserInfo?.membershipId === job.membershipId
-        );
-        
-        // Skip if member is not in PGCR or didn't complete the activity
-        if (!memberEntry || memberEntry.values?.completed?.basic?.value !== 1) {
-          return { skipped: true };
-        }
-        
         return {
           isFullClear: determineClearType(pgcr, activity.date || ''),
           playtime: extractPlaytime(pgcr, job.membershipId),
           date: activity.date,
-          skipped: false,
         };
       })
     );
@@ -201,11 +138,6 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
     // Aggregate batch results
     for (const result of batchResults) {
       if (result.status === 'fulfilled' && result.value) {
-        if (result.value.skipped) {
-          skippedIncomplete++;
-          continue;
-        }
-        
         successCount++;
         if (result.value.isFullClear) fullClearsFound++;
         totalPlaytime += result.value.playtime;
@@ -266,10 +198,10 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
 
   const duration = Date.now() - startTime;
   const reqPerSec = ((successCount) / (duration / 1000)).toFixed(1);
-  const failureCount = job.activities.length - successCount - skippedIncomplete;
+  const failureCount = job.activities.length - successCount;
   
   console.log(
     `[StatsQueue] ✓ ${successCount}/${job.activities.length} in ${(duration/1000).toFixed(1)}s ` +
-    `(${reqPerSec} req/s) | Full Clears: ${fullClearsFound} | Skipped: ${skippedIncomplete} | Failed: ${failureCount}`
+    `(${reqPerSec} req/s) | Clears: ${fullClearsFound} | Failed: ${failureCount}`
   );
 }
