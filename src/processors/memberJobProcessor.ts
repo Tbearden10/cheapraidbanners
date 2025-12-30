@@ -45,7 +45,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     (sum, acts) => sum + acts.length, 0
   );
   
-  console.log(`[MemberJob] Fetched ${totalActivitiesFetched} activities for ${job.displayName}`);
+  console.log(`[MemberJob] Fetched ${totalActivitiesFetched} total activities for ${job.displayName}`);
 
   // Group by dungeon hash
   const activitiesByDungeon: Record<string, any[]> = {};
@@ -70,7 +70,12 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   }
 
   // Dedupe per dungeon
+  let totalBeforeDedupe = 0;
+  let totalAfterDedupe = 0;
   for (const hash of Object.keys(activitiesByDungeon)) {
+    const beforeCount = activitiesByDungeon[hash].length;
+    totalBeforeDedupe += beforeCount;
+    
     const map = new Map<string, any>();
     
     for (const act of activitiesByDungeon[hash]) {
@@ -90,7 +95,14 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       }
     }
     activitiesByDungeon[hash] = Array.from(map.values());
+    const afterCount = activitiesByDungeon[hash].length;
+    totalAfterDedupe += afterCount;
+    
+    if (beforeCount !== afterCount) {
+      console.log(`[MemberJob] Deduped dungeon ${hash}: ${beforeCount} -> ${afterCount} (${beforeCount - afterCount} duplicates)`);
+    }
   }
+  console.log(`[MemberJob] Total after deduplication: ${totalAfterDedupe} (removed ${totalBeforeDedupe - totalAfterDedupe} duplicates)`);
 
   // Calculate total batches across all dungeons
   let totalBatches = 0;
@@ -244,7 +256,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       });
       
       totalQueued += batches[batchIndex].length;
-      totalBatches++;
+      batchesQueued++;
     }
 
     console.log(`[MemberJob] Queued ${batches.length} batch(es) for ${dungeon.displayName} (${activitiesPayload.length} activities)`);
@@ -253,7 +265,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   await notifyRunComplete(env, job);
 
   const duration = Date.now() - startTime;
-  console.log(`[MemberJob] COMPLETE: ${job.displayName} | Queued: ${totalQueued} | Batches: ${totalBatches} | ${(duration/1000).toFixed(1)}s`);
+  console.log(`[MemberJob] COMPLETE: ${job.displayName} | Queued: ${totalQueued} activities in ${batchesQueued} batches | ${(duration/1000).toFixed(1)}s`);
 }
 
 async function notifyRunComplete(env: Env, job: MemberJob): Promise<void> {
