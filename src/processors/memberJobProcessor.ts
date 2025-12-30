@@ -140,8 +140,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     console.log(`[MemberJob:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
 
     // IMPORTANT: Don't skip based on count comparison alone!
-    // For users with many clears (9000+), the Bungie API may only return ~1000 activities
-    // due to API limits. We must rely on date filtering to find new activities.
+    // Users with many clears may have more in the DB than we fetched (due to cutoff dates).
+    // We must rely on date filtering to find new activities after the last processed date.
     // Removed check: if (completed.length <= dbTotalClears) { continue; }
 
     completed.sort((a, b) => {
@@ -225,8 +225,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     console.log(`[MemberJob:Queue:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
 
     // IMPORTANT: Don't skip based on count comparison alone!
-    // For users with many clears (9000+), the Bungie API may only return ~1000 activities
-    // due to API limits. We must rely on date filtering to find new activities.
+    // Users with many clears may have more in the DB than we fetched (due to cutoff dates).
+    // We must rely on date filtering to find new activities after the last processed date.
     // Removed check: if (completed.length <= dbTotalClears) { continue; }
 
     // Sort by period ascending (oldest first)
@@ -332,11 +332,9 @@ async function fetchAllActivities(
 
   async function fetchAllPagesForCharacter(charId: string, mode: number) {
     const pageSize = 250;
-    const maxPages = 20; // Bungie API typically limits to ~1000 activities, but we'll try up to 5000 (20 × 250 per page) to handle edge cases
-    const logThresholdPage = 4; // Start logging when fetching many pages (potential API limit scenario)
     let page = 0;
 
-    while (page < maxPages) {
+    while (true) {
       const activities: any[] = await withRateLimit(
         () =>
           fetchActivitiesForCharacter(
@@ -358,18 +356,7 @@ async function fetchAllActivities(
       if (!activities || activities.length < pageSize) break;
 
       page++;
-      
-      // Log if we're fetching a lot of pages (potential API limit scenario)
-      if (page >= logThresholdPage) {
-        console.log(`[MemberJob] Fetching page ${page} for character ${charId} mode ${mode} (${out[charId].length} activities so far)`);
-      }
-      
       await sleep(200);
-    }
-    
-    // Warn if we hit the max page limit (likely hit API limit)
-    if (page >= maxPages) {
-      console.warn(`[MemberJob] ⚠️  Hit max page limit (${maxPages}) for character ${charId} mode ${mode}. User may have more activities than can be fetched. Total fetched: ${out[charId].length}`);
     }
   }
 
