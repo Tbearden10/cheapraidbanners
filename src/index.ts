@@ -723,6 +723,77 @@ export default {
         return jsonResponse({ success: true, clanId }, 200, request, env);
       }
 
+      // POST /admin/refresh-member
+      if (url.pathname === '/admin/refresh-member' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({} as any));
+        const membershipId = String(body.membershipId || '');
+        const membershipType = Number(body.membershipType || 0);
+        const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
+
+        if (!membershipId || !membershipType) {
+          return jsonResponse({ 
+            success: false, 
+            error: 'membershipId and membershipType are required' 
+          }, 400, request, env);
+        }
+
+        // Get member info from DB
+        const members = await getMembersList(env.DB, clanId, false);
+        const member = members.find(m => m.membership_id === membershipId);
+        
+        if (!member) {
+          return jsonResponse({ 
+            success: false, 
+            error: `Member ${membershipId} not found in clan ${clanId}` 
+          }, 404, request, env);
+        }
+
+        // Clear existing stats for this member
+        try {
+          await env.DB.prepare(
+            `DELETE FROM member_dungeon_stats WHERE clan_id = ? AND membership_id = ?`
+          ).bind(clanId, membershipId).run();
+          console.log(`[Admin] Cleared stats for member ${member.display_name} (${membershipId})`);
+        } catch (err) {
+          console.error('[Admin] Failed to clear member stats:', err);
+          return jsonResponse({ 
+            success: false, 
+            error: 'Failed to clear member stats',
+            details: (err as any)?.message ?? String(err)
+          }, 500, request, env);
+        }
+
+        // Queue member job with diagnostic logging
+        try {
+          await env.MEMBER_STATS_QUEUE.send({
+            clanId,
+            membershipId,
+            membershipType,
+            displayName: member.display_name,
+            lastProcessedDate: null, // Force reprocess all activities
+            runId: `manual-refresh-${Date.now()}`,
+          } as MemberJob);
+
+          console.log(`[Admin] Queued refresh for member ${member.display_name} (${membershipId})`);
+          
+          return jsonResponse({ 
+            success: true,
+            membershipId,
+            membershipType,
+            displayName: member.display_name,
+            queued: true,
+            message: 'Member stats refresh queued. Check logs for diagnostic output including pagination, deduplication, and per-dungeon activity counts.'
+          }, 200, request, env);
+        } catch (err) {
+          console.error('[Admin] Failed to queue member job:', err);
+          return jsonResponse({ 
+            success: false, 
+            error: 'Failed to queue member job',
+            details: (err as any)?.message ?? String(err)
+          }, 500, request, env);
+        }
+      }
+
       // 404 - Not Found
       return jsonResponse({ error: 'Not found' }, 404, request, env);
       
