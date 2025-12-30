@@ -40,7 +40,6 @@ export const ACTIVITY_REFERENCE_MAP: ActivityReference[] = [
     referenceIds: [
       "2004855007", // Standard (Normal)
       "2534833093", // Master
-      "3492566689", // Normal 
     ],
   },
   {
