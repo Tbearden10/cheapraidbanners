@@ -299,9 +299,11 @@ async function fetchAllActivities(
   const out: Record<string, any[]> = {};
   for (const id of characterIds) out[id] = [];
 
-  const modes = [82, 2]; // Dungeon, Story
+  // Use mode 0 (All) to fetch all activities, ensuring we don't miss any dungeon runs
+  // that might be categorized differently by Bungie
+  const mode = 0;
 
-  async function fetchAllPagesForCharacter(charId: string, mode: number) {
+  async function fetchAllPagesForCharacter(charId: string) {
     const pageSize = 250;
     let page = 0;
 
@@ -331,12 +333,9 @@ async function fetchAllActivities(
     }
   }
 
-  for (const mode of modes) {
-    await Promise.all(
-      characterIds.map((charId) => fetchAllPagesForCharacter(charId, mode))
-    );
-    await sleep(250);
-  }
+  await Promise.all(
+    characterIds.map((charId) => fetchAllPagesForCharacter(charId))
+  );
 
   return out;
 }
