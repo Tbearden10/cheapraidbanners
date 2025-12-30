@@ -8,6 +8,15 @@ export interface ActivityReference {
 
 export const ACTIVITY_REFERENCE_MAP: ActivityReference[] = [
   {
+    hash: "2727361621", // Equilibrium
+    displayName: "Equilibrium",
+    referenceIds: [
+      "2727361621",    // standard
+      "1754635208"     // contest
+      
+    ],
+  },
+  {
     hash: "3834447244", // Sundered Doctrine - Normal
     displayName: "Sundered Doctrine",
     referenceIds: [
