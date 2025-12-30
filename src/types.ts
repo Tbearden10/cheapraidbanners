@@ -77,6 +77,7 @@ export interface Env {
   // Durable Objects
   BATCH_COORDINATOR: DurableObjectNamespace;
   RUN_TRACKER: DurableObjectNamespace;
+  MEMBER_COORDINATOR: DurableObjectNamespace;
 }
 
 /** Shapes matching DB rows (nullable where appropriate) */

@@ -713,6 +713,90 @@ export default {
         return jsonResponse({ success: true, results }, 200, request, env);
       }
 
+      // POST /admin/refresh-user
+      if (url.pathname === '/admin/refresh-user' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({} as any));
+        const membershipId = String(body.membershipId ?? '');
+        const force = !!body.force;
+        const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
+
+        // Validate membershipId
+        if (!membershipId) {
+          return jsonResponse({ error: 'Missing membershipId parameter' }, 400, request, env);
+        }
+
+        const results: Record<string, unknown> = {
+          membershipId,
+          force,
+          clanId
+        };
+
+        try {
+          // Get member from database
+          const member = await env.DB.prepare(`
+            SELECT * FROM clan_members 
+            WHERE clan_id = ? AND membership_id = ? AND is_active = 1
+          `).bind(clanId, membershipId).first();
+
+          if (!member) {
+            return jsonResponse({ 
+              error: 'Member not found or inactive', 
+              membershipId 
+            }, 404, request, env);
+          }
+
+          // If force is requested, clear existing stats for this user
+          if (force) {
+            try {
+              await env.DB.prepare(`
+                DELETE FROM member_dungeon_stats 
+                WHERE clan_id = ? AND membership_id = ?
+              `).bind(clanId, membershipId).run();
+              results.cleared = true;
+            } catch (err) {
+              results.cleared = false;
+              results.clearError = (err as any)?.message ?? String(err);
+            }
+          }
+
+          // Get last processed date (will be null if force cleared stats)
+          const prevRow = await env.DB.prepare(`
+            SELECT MAX(last_processed_date) AS last_processed_date
+            FROM member_dungeon_stats
+            WHERE clan_id = ? AND membership_id = ?
+          `).bind(clanId, membershipId).first();
+
+          const lastProcessedDate = force ? null : (prevRow ? (prevRow as any).last_processed_date ?? null : null);
+
+          // Generate a run ID for tracking
+          const runId = `run-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+          // Queue the member job
+          await env.MEMBER_STATS_QUEUE.send({
+            clanId,
+            membershipId: (member as any).membership_id,
+            membershipType: (member as any).membership_type,
+            displayName: (member as any).display_name,
+            lastProcessedDate,
+            runId,
+          });
+
+          results.queued = true;
+          results.runId = runId;
+          results.displayName = (member as any).display_name;
+
+          console.log(`[AdminRefreshUser] Queued member job for ${(member as any).display_name} (${membershipId}) with force=${force}`);
+
+          return jsonResponse({ success: true, results }, 200, request, env);
+        } catch (err) {
+          console.error(`[AdminRefreshUser] Error processing member ${membershipId}:`, err);
+          return jsonResponse({ 
+            error: 'Failed to queue member refresh', 
+            message: (err as any)?.message ?? String(err) 
+          }, 500, request, env);
+        }
+      }
+
       // POST /admin/recompute
       if (url.pathname === '/admin/recompute' && request.method === 'POST') {
         const body = await request.json().catch(() => ({} as any));
