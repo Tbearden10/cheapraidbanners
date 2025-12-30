@@ -184,8 +184,8 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
           e?.player?.destinyUserInfo?.membershipId === job.membershipId
         );
         
-        // Skip if member didn't complete the activity
-        if (memberEntry && memberEntry.values?.completed?.basic?.value !== 1) {
+        // Skip if member is not in PGCR or didn't complete the activity
+        if (!memberEntry || memberEntry.values?.completed?.basic?.value !== 1) {
           return { skipped: true };
         }
         

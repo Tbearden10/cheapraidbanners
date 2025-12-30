@@ -237,7 +237,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
         dungeonHash,
         activities: batches[batchIndex],
         jobId: `${job.membershipId}-${dungeonHash}-${batchIndex}`,
-        coordinatorId: job.membershipId, // Use membershipId as coordinator ID
+        // coordinatorId links to MemberCoordinator durable object which aggregates 
+        // all batches for this member and triggers final aggregate recomputation
+        coordinatorId: job.membershipId,
       });
       
       totalQueued += batches[batchIndex].length;
