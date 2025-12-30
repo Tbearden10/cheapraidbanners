@@ -65,7 +65,10 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       for (const dungeon of ACTIVITY_REFERENCE_MAP) {
         if (dungeon.referenceIds.includes(refId)) {
           const instanceId = activity.activityDetails?.instanceId || activity.instanceId;
-          if (!instanceId) break;
+          if (!instanceId) {
+            // Skip activities without instanceId - can't deduplicate or fetch PGCR later
+            break;
+          }
           
           const dungeonMap = activitiesByDungeon[dungeon.hash];
           const actWithChar = { ...activity, characterId: charId };
