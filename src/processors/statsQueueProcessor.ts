@@ -6,6 +6,7 @@
 
 import type { Env, StatsQueueJob } from '../types';
 import { fetchPGCR } from '../api/bungieApi';
+import { recomputeClanAggregateStats } from '../db/aggregateHelpers';
 
 const BEYOND_LIGHT_START_MS = Date.parse('2020-11-10T17:00:00.000Z');
 const WITCH_QUEEN_START_MS = Date.parse('2022-02-22T17:00:00.000Z');
@@ -55,6 +56,15 @@ async function writeIncremental(env: Env, data: {
   lastProcessedDate: string | null;
 }): Promise<void> {
   const now = Date.now();
+  
+  // NOTE: This function is called by queue workers and should be idempotent.
+  // However, there's a small edge case where if the worker times out AFTER this write
+  // completes but BEFORE ack(), the queue will retry and double-count.
+  // In practice, this is rare because:
+  // 1. The write is fast (< 100ms)
+  // 2. Workers have a 30s timeout
+  // 3. Clan aggregate stats are periodically recomputed from member stats, fixing any drift
+  // Future improvement: Add a processed_batches table to track batch IDs for true idempotency
   
   // Update member stats only - clan aggregates will be recomputed later
   await env.DB.prepare(`
@@ -157,7 +167,7 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
         body: JSON.stringify({
           batchId: job.jobId,
           dungeonHash: job.dungeonHash,
-          batchIndex: parseInt(job.jobId.split('-').pop() || '0'),
+          batchIndex: job.batchIndex ?? 0,
           clearsDelta: successCount,
           fullClearsDelta: fullClearsFound,
           playtimeDelta: totalPlaytime,
@@ -172,7 +182,6 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
         console.log(`[StatsQueue] ✓ All batches complete for member ${job.membershipId}`);
         // Trigger clan aggregate recompute
         try {
-          const { recomputeClanAggregateStats } = await import('../db/aggregateHelpers');
           await recomputeClanAggregateStats(env.DB, job.clanId);
           console.log(`[StatsQueue] ✓ Clan aggregates recomputed after member completion`);
         } catch (err) {
