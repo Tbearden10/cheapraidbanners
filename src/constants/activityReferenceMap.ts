@@ -9,7 +9,7 @@ export interface ActivityReference {
 export const ACTIVITY_REFERENCE_MAP: ActivityReference[] = [
   {
     hash: "2727361621", // Equilibrium
-    displayName: "EQ",
+    displayName: "Equilibrium",
     referenceIds: [
       "2727361621",    // standard
       "1754635208"     // contest
