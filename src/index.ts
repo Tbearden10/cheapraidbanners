@@ -794,6 +794,72 @@ export default {
         return jsonResponse({ success: true, clanId }, 200, request, env);
       }
 
+      // GET /admin/status
+      if (url.pathname === '/admin/status' && request.method === 'GET') {
+        const clanId = env.BUNGIE_CLAN_ID;
+        
+        try {
+          // Get member counts
+          const memberStats = await env.DB.prepare(`
+            SELECT 
+              COUNT(*) as total_members,
+              SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_members,
+              SUM(CASE WHEN is_online = 1 THEN 1 ELSE 0 END) as online_members
+            FROM clan_members
+            WHERE clan_id = ?
+          `).bind(clanId).first();
+
+          // Get stats processing info
+          const statsInfo = await env.DB.prepare(`
+            SELECT 
+              COUNT(DISTINCT membership_id) as members_with_stats,
+              COUNT(DISTINCT dungeon_hash) as dungeons_tracked,
+              SUM(total_clears) as total_clears_all,
+              SUM(total_full_clears) as total_full_clears_all,
+              MAX(last_processed_date) as most_recent_process
+            FROM member_dungeon_stats
+            WHERE clan_id = ?
+          `).bind(clanId).first();
+
+          // Get aggregate info
+          const aggregateInfo = await env.DB.prepare(`
+            SELECT 
+              COUNT(*) as dungeon_aggregates,
+              MAX(last_updated) as last_aggregate_update
+            FROM clan_aggregate_stats
+            WHERE clan_id = ? AND dungeon_hash != 'all'
+          `).bind(clanId).first();
+
+          return jsonResponse({
+            clanId,
+            timestamp: new Date().toISOString(),
+            members: {
+              total: Number((memberStats as any)?.total_members ?? 0),
+              active: Number((memberStats as any)?.active_members ?? 0),
+              online: Number((memberStats as any)?.online_members ?? 0),
+            },
+            stats: {
+              membersWithStats: Number((statsInfo as any)?.members_with_stats ?? 0),
+              dungeonsTracked: Number((statsInfo as any)?.dungeons_tracked ?? 0),
+              totalClears: Number((statsInfo as any)?.total_clears_all ?? 0),
+              totalFullClears: Number((statsInfo as any)?.total_full_clears_all ?? 0),
+              mostRecentProcess: (statsInfo as any)?.most_recent_process ?? null,
+            },
+            aggregates: {
+              dungeonCount: Number((aggregateInfo as any)?.dungeon_aggregates ?? 0),
+              lastUpdate: (aggregateInfo as any)?.last_aggregate_update ?? null,
+            },
+            note: "Cloudflare Workers Queues do not provide APIs to view queue status or stop jobs. To stop processing, redeploy with queue consumers disabled in wrangler.toml"
+          }, 200, request, env);
+        } catch (err) {
+          console.error(`[Status] Error fetching status:`, err);
+          return jsonResponse({ 
+            error: 'Failed to fetch status',
+            message: (err as any)?.message ?? String(err)
+          }, 500, request, env);
+        }
+      }
+
       // 404 - Not Found
       return jsonResponse({ error: 'Not found' }, 404, request, env);
       
