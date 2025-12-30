@@ -136,8 +136,10 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     
     if (completed.length > dbTotalClears) {
       // We have more completions than before
-      // Process only the NEW completions (the last N in chronological order)
-      // This handles the character-switching case where period doesn't reflect completion time
+      // Process only the NEW completions (the last N in chronological order by instance start time)
+      // Note: This is a heuristic since 'period' reflects instance start time, not completion time.
+      // For the character-switching case, this ensures we process recent instances even if they
+      // were started before the cutoff date but completed after.
       const newCount = completed.length - dbTotalClears;
       newActivities = completed.slice(-newCount);
     } else if (cutoffDate) {
@@ -224,8 +226,10 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     
     if (completed.length > dbTotalClears) {
       // We have more completions than before
-      // Process only the NEW completions (the last N in chronological order)
-      // This handles the character-switching case where period doesn't reflect completion time
+      // Process only the NEW completions (the last N in chronological order by instance start time)
+      // Note: This is a heuristic since 'period' reflects instance start time, not completion time.
+      // For the character-switching case, this ensures we process recent instances even if they
+      // were started before the cutoff date but completed after.
       const newCount = completed.length - dbTotalClears;
       newActivities = completed.slice(-newCount);
     } else if (cutoffDate) {
