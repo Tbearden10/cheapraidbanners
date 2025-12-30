@@ -104,82 +104,11 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   }
   console.log(`[MemberJob] Total after deduplication: ${totalAfterDedupe} (removed ${totalBeforeDedupe - totalAfterDedupe} duplicates)`);
 
-  // Calculate total batches across all dungeons
-  let totalBatches = 0;
-  const dungeonBatchCounts: Record<string, number> = {};
-  
-  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-    const dungeonHash = dungeon.hash;
-    const activities = activitiesByDungeon[dungeonHash] || [];
-    if (activities.length === 0) continue;
-
-    const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
-    if (completed.length === 0) continue;
-
-    // Check DB for previous stats
-    const prevRow = await env.DB.prepare(`
-      SELECT last_processed_date, total_clears
-      FROM member_dungeon_stats
-      WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
-    `).bind(job.clanId, job.membershipId, dungeonHash).first();
-
-    let cutoffDate: Date | null = null;
-    if (prevRow && (prevRow as any).last_processed_date) {
-      cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
-    }
-
-    // Sort by period ascending (oldest first)
-    completed.sort((a, b) => {
-      const ta = a.period ? new Date(a.period).getTime() : 0;
-      const tb = b.period ? new Date(b.period).getTime() : 0;
-      return ta - tb;
-    });
-
-    // Filter to new activities after cutoff date
-    // If no cutoff date exists, process all activities (first-time processing)
-    let newActivities = completed;
-    if (cutoffDate) {
-      newActivities = completed.filter(a => {
-        try {
-          const actDate = new Date(a.period);
-          return actDate.getTime() > cutoffDate!.getTime();
-        } catch {
-          return true;
-        }
-      });
-    }
-
-    // Skip if no new activities based on date filtering
-    if (newActivities.length === 0) continue;
-
-    const batchCount = Math.ceil(newActivities.length / MAX_BATCH_SIZE);
-    totalBatches += batchCount;
-    dungeonBatchCounts[dungeonHash] = batchCount;
-  }
-
-  // Initialize MemberCoordinator if we have batches to process
-  if (totalBatches > 0) {
-    const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.membershipId);
-    const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
-    
-    await coordinator.fetch('https://internal/init', {
-      method: 'POST',
-      body: JSON.stringify({
-        membershipId: job.membershipId,
-        membershipType: job.membershipType,
-        clanId: job.clanId,
-        totalBatches,
-        dungeonBatches: dungeonBatchCounts
-      }),
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  // Queue per-dungeon jobs
+  // Stream-based processing: process and queue dungeons one at a time
+  // This avoids memory issues with large activity counts (9000+)
   let totalQueued = 0;
   let batchesQueued = 0;
+  const dungeonBatchCounts: Record<string, number> = {};
 
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
     const dungeonHash = dungeon.hash;
@@ -231,6 +160,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       continue;
     }
 
+    console.log(`[MemberJob] ${dungeon.displayName}: ${newActivities.length} new activities to process`);
+
     // Prepare activities payload
     const activitiesPayload = newActivities.map(a => ({
       instanceId: a.activityDetails?.instanceId || a.instanceId,
@@ -238,28 +169,52 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       characterId: (a as any).characterId,
     }));
 
-    // Split into batches
-    const batches: any[][] = [];
-    for (let i = 0; i < activitiesPayload.length; i += MAX_BATCH_SIZE) {
-      batches.push(activitiesPayload.slice(i, i + MAX_BATCH_SIZE));
-    }
-
-    // Queue each batch
-    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+    // Stream batches: create and send immediately (avoid memory buildup)
+    const batchSize = MAX_BATCH_SIZE;
+    let dungeonBatchCount = 0;
+    
+    for (let i = 0; i < activitiesPayload.length; i += batchSize) {
+      const batch = activitiesPayload.slice(i, Math.min(i + batchSize, activitiesPayload.length));
+      
       await env.STATS_QUEUE.send({
         clanId: job.clanId,
         membershipId: job.membershipId,
         membershipType: job.membershipType,
         dungeonHash,
-        activities: batches[batchIndex],
-        jobId: `${job.membershipId}-${dungeonHash}-${batchIndex}`,
+        activities: batch,
+        jobId: `${job.membershipId}-${dungeonHash}-${dungeonBatchCount}`,
       });
       
-      totalQueued += batches[batchIndex].length;
+      totalQueued += batch.length;
       batchesQueued++;
+      dungeonBatchCount++;
     }
 
-    console.log(`[MemberJob] Queued ${batches.length} batch(es) for ${dungeon.displayName} (${activitiesPayload.length} activities)`);
+    dungeonBatchCounts[dungeonHash] = dungeonBatchCount;
+    console.log(`[MemberJob] Queued ${dungeonBatchCount} batch(es) for ${dungeon.displayName} (${activitiesPayload.length} activities)`);
+  }
+
+  // Initialize MemberCoordinator after processing (if we have batches)
+  if (batchesQueued > 0) {
+    try {
+      const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.membershipId);
+      const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
+      
+      await coordinator.fetch('https://internal/init', {
+        method: 'POST',
+        body: JSON.stringify({
+          membershipId: job.membershipId,
+          membershipType: job.membershipType,
+          clanId: job.clanId,
+          totalBatches: batchesQueued,
+          dungeonBatches: dungeonBatchCounts
+        }),
+        headers: { 'Content-Type': 'application/json' },
+      });
+      console.log(`[MemberJob] Initialized MemberCoordinator with ${batchesQueued} batches`);
+    } catch (err) {
+      console.warn('[MemberJob] Failed to initialize MemberCoordinator:', err);
+    }
   }
 
   await notifyRunComplete(env, job);
