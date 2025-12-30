@@ -108,7 +108,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
     if (completed.length === 0) continue;
 
-    // Check DB for previous stats to get cutoff date
+    // Check DB for previous stats
     const prevRow = await env.DB.prepare(`
       SELECT last_processed_date, total_clears
       FROM member_dungeon_stats
@@ -122,14 +122,23 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       cutoffDate = new Date(job.lastProcessedDate);
     }
 
-    // Sort by period ascending (oldest first)
+    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
+
+    // Log comparison per dungeon
+    console.log(`[MemberJob:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
+
+    // Do count check first per dungeon
+    if (completed.length <= dbTotalClears) {
+      console.log(`[MemberJob:${dungeon.displayName}] Skipping - no new activities (fetched <= DB)`);
+      continue;
+    }
+
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
       const tb = b.period ? new Date(b.period).getTime() : 0;
       return ta - tb;
     });
 
-    // Filter to new activities after cutoff date
     let newActivities = completed;
     if (cutoffDate) {
       newActivities = completed.filter(a => {
@@ -140,10 +149,13 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
           return true;
         }
       });
+      console.log(`[MemberJob:${dungeon.displayName}] After date filter: ${newActivities.length} new activities (cutoff: ${cutoffDate.toISOString()})`);
     }
 
-    // Skip if no new activities after filtering by date
-    if (newActivities.length === 0) continue;
+    if (newActivities.length === 0) {
+      console.log(`[MemberJob:${dungeon.displayName}] Skipping - no activities after date filter`);
+      continue;
+    }
 
     const batchCount = Math.ceil(newActivities.length / MAX_BATCH_SIZE);
     totalBatches += batchCount;
@@ -183,7 +195,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
     if (completed.length === 0) continue;
 
-    // Check DB for previous stats to get cutoff date
+    // Check DB for previous stats
     const prevRow = await env.DB.prepare(`
       SELECT last_processed_date, total_clears
       FROM member_dungeon_stats
@@ -197,6 +209,17 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       cutoffDate = new Date(job.lastProcessedDate);
     }
 
+    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
+
+    // Log comparison per dungeon
+    console.log(`[MemberJob:Queue:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
+
+    // Do count check first per dungeon
+    if (completed.length <= dbTotalClears) {
+      console.log(`[MemberJob:Queue:${dungeon.displayName}] Skipping - no new activities (fetched <= DB)`);
+      continue;
+    }
+
     // Sort by period ascending (oldest first)
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
@@ -204,7 +227,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       return ta - tb;
     });
 
-    // Filter to new activities after cutoff date
+    // Filter to new activities after cutoff
     let newActivities = completed;
     if (cutoffDate) {
       newActivities = completed.filter(a => {
@@ -215,10 +238,11 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
           return true;
         }
       });
+      console.log(`[MemberJob:Queue:${dungeon.displayName}] After date filter: ${newActivities.length} new activities (cutoff: ${cutoffDate.toISOString()})`);
     }
 
-    // Skip if no new activities after filtering by date
     if (newActivities.length === 0) {
+      console.log(`[MemberJob:Queue:${dungeon.displayName}] Skipping - no activities after date filter`);
       continue;
     }
 
