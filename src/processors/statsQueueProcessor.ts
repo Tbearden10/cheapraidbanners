@@ -18,24 +18,25 @@ const DELAY_MS = 50;
 function determineClearType(pgcr: any, period: string): boolean {
   const timestamp = Date.parse(period);
   
-  // Count instances with more than 3 players as valid full clears
+  // Helper to check if instance has more than 3 players
   // Dungeons are designed for 3 players, but some instances may have more players
   // due to special modes, bugs, or other circumstances - these should still count
-  const playerCount = (pgcr.entries || []).length;
-  const hasMultiplePlayers = playerCount > 3;
+  const hasMultiplePlayers = () => (pgcr.entries || []).length > 3;
+  
+  // Different time periods use different Bungie API fields to determine full clears:
+  // - Haunted+ and Witch Queen+: Use activityWasStartedFromBeginning
+  // - Pre-Beyond Light: Use startingPhaseIndex
+  // - Between Beyond Light and Witch Queen: Default to true
+  // All periods: Also accept instances with >3 players as full clears
   
   if (timestamp >= HAUNTED_START_MS) {
-    // If there are more than 3 players, be more lenient and count as full clear
-    // as long as the activity was completed (we know it was since it's in completed list)
-    return Boolean(pgcr.activityWasStartedFromBeginning) || hasMultiplePlayers;
+    return Boolean(pgcr.activityWasStartedFromBeginning) || hasMultiplePlayers();
   }
   if (timestamp < BEYOND_LIGHT_START_MS) {
-    // For older activities, also be lenient with player count
-    return pgcr.startingPhaseIndex === 0 || hasMultiplePlayers;
+    return pgcr.startingPhaseIndex === 0 || hasMultiplePlayers();
   }
   if (timestamp >= WITCH_QUEEN_START_MS) {
-    // For Witch Queen era, also be lenient with player count
-    return Boolean(pgcr.activityWasStartedFromBeginning) || hasMultiplePlayers;
+    return Boolean(pgcr.activityWasStartedFromBeginning) || hasMultiplePlayers();
   }
   return true;
 }
