@@ -7,37 +7,15 @@
 import type { Env, StatsQueueJob } from '../types';
 import { fetchPGCR } from '../api/bungieApi';
 
-const BEYOND_LIGHT_START_MS = Date.parse('2020-11-10T17:00:00.000Z');
-const WITCH_QUEEN_START_MS = Date.parse('2022-02-22T17:00:00.000Z');
-const HAUNTED_START_MS = Date.parse('2022-05-24T17:00:00.000Z');
-
 // Match statsProcessor.ts batch size and delay
 const PGCR_BATCH_SIZE = 30;
 const DELAY_MS = 50;
 
 function determineClearType(pgcr: any, period: string): boolean {
-  const timestamp = Date.parse(period);
-  
-  // Helper to check if instance has more than 3 players
-  // Dungeons are designed for 3 players, but some instances may have more players
-  // due to special modes, bugs, or other circumstances - these should still count
-  const hasMultiplePlayers = () => (pgcr.entries || []).length > 3;
-  
-  // Different time periods use different Bungie API fields to determine full clears:
-  // - Haunted+ and Witch Queen+: Use activityWasStartedFromBeginning
-  // - Pre-Beyond Light: Use startingPhaseIndex
-  // - Between Beyond Light and Witch Queen: Default to true
-  // All periods: Also accept instances with >3 players as full clears
-  
-  if (timestamp >= HAUNTED_START_MS) {
-    return Boolean(pgcr.activityWasStartedFromBeginning) || hasMultiplePlayers();
-  }
-  if (timestamp < BEYOND_LIGHT_START_MS) {
-    return pgcr.startingPhaseIndex === 0 || hasMultiplePlayers();
-  }
-  if (timestamp >= WITCH_QUEEN_START_MS) {
-    return Boolean(pgcr.activityWasStartedFromBeginning) || hasMultiplePlayers();
-  }
+  // All completed dungeon activities should count as full clears
+  // We're already filtering to only completed activities (completed.basic.value === 1)
+  // Character swaps, player joins/leaves during runs are normal and don't invalidate the clear
+  // The activityWasStartedFromBeginning field can be unreliable for instances with character swaps
   return true;
 }
 
