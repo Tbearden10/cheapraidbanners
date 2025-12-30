@@ -130,8 +130,17 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       return ta - tb;
     });
 
+    // Determine which activities are new
     let newActivities = completed;
-    if (cutoffDate) {
+    
+    if (completed.length > dbTotalClears) {
+      // We have more completions than before
+      // Process only the NEW completions (the last N in chronological order)
+      // This handles the character-switching case where period doesn't reflect completion time
+      const newCount = completed.length - dbTotalClears;
+      newActivities = completed.slice(-newCount);
+    } else if (cutoffDate) {
+      // Same number of completions, filter by date for incremental updates
       newActivities = completed.filter(a => {
         try {
           const actDate = new Date(a.period);
@@ -209,18 +218,11 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       return ta - tb;
     });
 
-    // Filter to new activities after cutoff
-    let newActivities = completed;
-    if (cutoffDate) {
-      newActivities = completed.filter(a => {
-        try {
-          const actDate = new Date(a.period);
-          return actDate.getTime() > cutoffDate!.getTime();
-        } catch {
-          return true;
-        }
-      });
-    }
+    // We have more completions than before
+    // Process only the NEW completions (the last N in chronological order)
+    // This handles the character-switching case where period doesn't reflect completion time
+    const newCount = completed.length - dbTotalClears;
+    const newActivities = completed.slice(-newCount);
 
     if (newActivities.length === 0) {
       continue;
