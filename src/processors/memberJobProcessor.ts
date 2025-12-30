@@ -120,7 +120,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    if (completed.length <= dbTotalClears) {
+    // Skip if no new activities by count
+    if (completed.length < dbTotalClears) {
       continue;
     }
 
@@ -206,8 +207,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    // Skip if no new activities
-    if (completed.length <= dbTotalClears) {
+    // Skip if no new activities by count
+    if (completed.length < dbTotalClears) {
       continue;
     }
 
@@ -218,11 +219,26 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       return ta - tb;
     });
 
-    // We have more completions than before
-    // Process only the NEW completions (the last N in chronological order)
-    // This handles the character-switching case where period doesn't reflect completion time
-    const newCount = completed.length - dbTotalClears;
-    const newActivities = completed.slice(-newCount);
+    // Determine which activities are new
+    let newActivities = completed;
+    
+    if (completed.length > dbTotalClears) {
+      // We have more completions than before
+      // Process only the NEW completions (the last N in chronological order)
+      // This handles the character-switching case where period doesn't reflect completion time
+      const newCount = completed.length - dbTotalClears;
+      newActivities = completed.slice(-newCount);
+    } else if (cutoffDate) {
+      // Same number of completions, filter by date for incremental updates
+      newActivities = completed.filter(a => {
+        try {
+          const actDate = new Date(a.period);
+          return actDate.getTime() > cutoffDate!.getTime();
+        } catch {
+          return true;
+        }
+      });
+    }
 
     if (newActivities.length === 0) {
       continue;
