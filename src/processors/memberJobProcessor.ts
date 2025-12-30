@@ -139,17 +139,14 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     console.log(`[MemberJob:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
 
-    if (completed.length <= dbTotalClears) {
-      console.log(`[MemberJob:${dungeon.displayName}] Skipping - no new activities (fetched <= DB)`);
-      continue;
-    }
-
+    // Sort activities by date (oldest first) to properly filter
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
       const tb = b.period ? new Date(b.period).getTime() : 0;
       return ta - tb;
     });
 
+    // Filter to only new activities after the cutoff date
     let newActivities = completed;
     if (cutoffDate) {
       newActivities = completed.filter(a => {
@@ -164,7 +161,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     }
 
     if (newActivities.length === 0) {
-      console.log(`[MemberJob:${dungeon.displayName}] Skipping - no activities after date filter`);
+      console.log(`[MemberJob:${dungeon.displayName}] Skipping - no new activities after date filter`);
       continue;
     }
 
@@ -224,11 +221,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     console.log(`[MemberJob:Queue:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
 
-    if (completed.length <= dbTotalClears) {
-      console.log(`[MemberJob:Queue:${dungeon.displayName}] Skipping - no new activities (fetched <= DB)`);
-      continue;
-    }
-
     // Sort by period ascending (oldest first)
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
@@ -277,6 +269,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
         dungeonHash,
         activities: batches[batchIndex],
         jobId: `${job.membershipId}-${dungeonHash}-${batchIndex}`,
+        coordinatorId: job.membershipId, // Use membershipId as coordinator ID
       });
       
       totalQueued += batches[batchIndex].length;

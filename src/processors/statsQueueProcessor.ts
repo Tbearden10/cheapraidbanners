@@ -56,6 +56,7 @@ async function writeIncremental(env: Env, data: {
 }): Promise<void> {
   const now = Date.now();
   
+  // Update member stats only - clan aggregates will be recomputed later
   await env.DB.prepare(`
     INSERT INTO member_dungeon_stats (
       clan_id, membership_id, membership_type, dungeon_hash,
@@ -83,26 +84,6 @@ async function writeIncremental(env: Env, data: {
     data.playtimeDelta,
     data.lastProcessedDate,
     now,
-    now
-  ).run();
-  
-  await env.DB.prepare(`
-    INSERT INTO clan_aggregate_stats (
-      clan_id, dungeon_hash,
-      total_clears, total_full_clears, total_playtime_seconds,
-      active_member_count, last_updated
-    ) VALUES (?, ?, ?, ?, ?, 1, ?)
-    ON CONFLICT (clan_id, dungeon_hash) DO UPDATE SET
-      total_clears = total_clears + excluded.total_clears,
-      total_full_clears = total_full_clears + excluded.total_full_clears,
-      total_playtime_seconds = total_playtime_seconds + excluded.total_playtime_seconds,
-      last_updated = excluded.last_updated
-  `).bind(
-    data.clanId,
-    data.dungeonHash,
-    data.clearsDelta,
-    data.fullClearsDelta,
-    data.playtimeDelta,
     now
   ).run();
 }
@@ -189,7 +170,14 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
       
       if (result.complete) {
         console.log(`[StatsQueue] ✓ All batches complete for member ${job.membershipId}`);
-        // Optionally: trigger additional processing when all member batches are done
+        // Trigger clan aggregate recompute
+        try {
+          const { recomputeClanAggregateStats } = await import('../db/aggregateHelpers');
+          await recomputeClanAggregateStats(env.DB, job.clanId);
+          console.log(`[StatsQueue] ✓ Clan aggregates recomputed after member completion`);
+        } catch (err) {
+          console.warn('[StatsQueue] Failed to recompute clan aggregates:', err);
+        }
       }
     } catch (err) {
       console.warn('[StatsQueue] Failed to report to MemberCoordinator:', err);
