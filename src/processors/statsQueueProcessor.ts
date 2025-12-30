@@ -11,7 +11,7 @@ import { fetchPGCR } from '../api/bungieApi';
 const PGCR_BATCH_SIZE = 30;
 const DELAY_MS = 50;
 
-function determineClearType(pgcr: any, period: string): boolean {
+function determineClearType(_pgcr: any, _period: string): boolean {
   // All completed dungeon activities should count as full clears
   // We're already filtering to only completed activities (completed.basic.value === 1)
   // Character swaps, player joins/leaves during runs are normal and don't invalidate the clear
