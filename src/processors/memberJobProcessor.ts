@@ -94,6 +94,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   // Dedupe per dungeon
   for (const hash of Object.keys(activitiesByDungeon)) {
     const map = new Map<string, any>();
+    const beforeCount = activitiesByDungeon[hash].length;
     
     for (const act of activitiesByDungeon[hash]) {
       const id = act.activityDetails?.instanceId || act.instanceId;
@@ -111,7 +112,15 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
         }
       }
     }
+    
+    const afterCount = map.size;
     activitiesByDungeon[hash] = Array.from(map.values());
+    
+    // Log significant deduplication
+    if (beforeCount > afterCount && beforeCount > 100) {
+      const dungeon = ACTIVITY_REFERENCE_MAP.find(d => d.hash === hash);
+      console.log(`[MemberJob] 🔄 ${dungeon?.displayName || hash}: ${beforeCount} → ${afterCount} (deduped ${beforeCount - afterCount})`);
+    }
   }
   
   // Log dungeon activity counts for debugging
@@ -326,6 +335,7 @@ async function fetchAllActivities(
   async function fetchAllPagesForCharacter(charId: string, mode: number) {
     const pageSize = 250;
     let page = 0;
+    let totalFetched = 0;
 
     while (true) {
       const activities: any[] = await withRateLimit(
@@ -344,12 +354,23 @@ async function fetchAllActivities(
 
       if (activities && activities.length > 0) {
         out[charId].push(...activities);
+        totalFetched += activities.length;
       }
 
       if (!activities || activities.length < pageSize) break;
 
       page++;
       await sleep(200);
+      
+      // Warn if fetching many pages (potential API limit)
+      if (page > 0 && page % 10 === 0) {
+        console.log(`[MemberJob] ⚠️  Fetched ${page} pages (${totalFetched} activities) for mode ${mode}, char ${charId.slice(0, 8)}... (Bungie API may have limits)`);
+      }
+    }
+    
+    // Log if we hit a high page count
+    if (page >= 10) {
+      console.log(`[MemberJob] 📊 Mode ${mode} char ${charId.slice(0, 8)}: ${page} pages, ${totalFetched} activities total`);
     }
   }
 
