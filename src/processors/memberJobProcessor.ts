@@ -53,20 +53,42 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     activitiesByDungeon[dungeon.hash] = [];
   }
 
+  const unmatchedActivities: any[] = [];
+  
   for (const charId of Object.keys(activitiesByChar)) {
     for (const activity of activitiesByChar[charId]) {
       const refId = String(activity?.activityDetails?.referenceId || '');
       
+      let matched = false;
       for (const dungeon of ACTIVITY_REFERENCE_MAP) {
         if (dungeon.referenceIds.includes(refId)) {
           activitiesByDungeon[dungeon.hash].push({
             ...activity,
             characterId: charId,
           });
+          matched = true;
           break;
         }
       }
+      
+      // Track unmatched activities for debugging
+      if (!matched && refId) {
+        unmatchedActivities.push({
+          refId,
+          mode: activity?.activityDetails?.mode,
+          directorActivityHash: activity?.activityDetails?.directorActivityHash,
+        });
+      }
     }
+  }
+  
+  // Log unmatched activities (potential missing dungeon referenceIds)
+  if (unmatchedActivities.length > 0) {
+    const uniqueUnmatched = Array.from(
+      new Map(unmatchedActivities.map(a => [a.refId, a])).values()
+    );
+    console.log(`[MemberJob] ⚠️  ${unmatchedActivities.length} unmatched activities (${uniqueUnmatched.length} unique):`, 
+      uniqueUnmatched.slice(0, 5).map(a => `refId=${a.refId} mode=${a.mode}`).join(', '));
   }
 
   // Dedupe per dungeon
@@ -90,6 +112,18 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       }
     }
     activitiesByDungeon[hash] = Array.from(map.values());
+  }
+  
+  // Log dungeon activity counts for debugging
+  const dungeonCounts = Object.entries(activitiesByDungeon)
+    .map(([hash, activities]) => {
+      const dungeon = ACTIVITY_REFERENCE_MAP.find(d => d.hash === hash);
+      return { name: dungeon?.displayName || hash, count: activities.length };
+    })
+    .filter(d => d.count > 0);
+  
+  if (dungeonCounts.length > 0) {
+    console.log(`[MemberJob] Dungeon activities: ${dungeonCounts.map(d => `${d.name}=${d.count}`).join(', ')}`);
   }
 
   // Calculate total batches across all dungeons
