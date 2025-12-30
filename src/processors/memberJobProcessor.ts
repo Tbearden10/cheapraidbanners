@@ -108,7 +108,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
     if (completed.length === 0) continue;
 
-    // Check DB for previous stats
+    // Check DB for previous stats to get cutoff date
     const prevRow = await env.DB.prepare(`
       SELECT last_processed_date, total_clears
       FROM member_dungeon_stats
@@ -122,18 +122,14 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       cutoffDate = new Date(job.lastProcessedDate);
     }
 
-    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-    if (completed.length <= dbTotalClears) {
-      continue;
-    }
-
+    // Sort by period ascending (oldest first)
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
       const tb = b.period ? new Date(b.period).getTime() : 0;
       return ta - tb;
     });
 
+    // Filter to new activities after cutoff date
     let newActivities = completed;
     if (cutoffDate) {
       newActivities = completed.filter(a => {
@@ -146,6 +142,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       });
     }
 
+    // Skip if no new activities after filtering by date
     if (newActivities.length === 0) continue;
 
     const batchCount = Math.ceil(newActivities.length / MAX_BATCH_SIZE);
@@ -186,7 +183,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
     if (completed.length === 0) continue;
 
-    // Check DB for previous stats
+    // Check DB for previous stats to get cutoff date
     const prevRow = await env.DB.prepare(`
       SELECT last_processed_date, total_clears
       FROM member_dungeon_stats
@@ -200,13 +197,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       cutoffDate = new Date(job.lastProcessedDate);
     }
 
-    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-    // Skip if no new activities
-    if (completed.length <= dbTotalClears) {
-      continue;
-    }
-
     // Sort by period ascending (oldest first)
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
@@ -214,7 +204,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       return ta - tb;
     });
 
-    // Filter to new activities after cutoff
+    // Filter to new activities after cutoff date
     let newActivities = completed;
     if (cutoffDate) {
       newActivities = completed.filter(a => {
@@ -227,6 +217,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       });
     }
 
+    // Skip if no new activities after filtering by date
     if (newActivities.length === 0) {
       continue;
     }
