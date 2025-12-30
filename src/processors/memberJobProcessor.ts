@@ -119,18 +119,15 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
         cutoffDate = new Date(job.lastProcessedDate);
       }
 
-      const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-      if (completed.length <= dbTotalClears) {
-        continue;
-      }
-
+      // Sort by period ascending (oldest first) before filtering
       completed.sort((a, b) => {
         const ta = a.period ? new Date(a.period).getTime() : 0;
         const tb = b.period ? new Date(b.period).getTime() : 0;
         return ta - tb;
       });
 
+      // Filter to new activities after cutoff date
+      // Don't use count comparison as Bungie API may return fewer activities than DB total
       let newActivities = completed;
       if (cutoffDate) {
         newActivities = completed.filter(a => {
@@ -196,13 +193,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
         cutoffDate = new Date(job.lastProcessedDate);
       }
 
-      const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-      // Skip if no new activities
-      if (completed.length <= dbTotalClears) {
-        continue;
-      }
-
       // Sort by period ascending (oldest first)
       completed.sort((a, b) => {
         const ta = a.period ? new Date(a.period).getTime() : 0;
@@ -210,7 +200,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
         return ta - tb;
       });
 
-      // Filter to new activities after cutoff
+      // Filter to new activities after cutoff date
+      // Don't use count comparison as Bungie API may return fewer activities than DB total
       let newActivities = completed;
       if (cutoffDate) {
         newActivities = completed.filter(a => {
