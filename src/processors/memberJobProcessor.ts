@@ -120,7 +120,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    // Skip if no new activities by count
+    // Skip if fewer completions than DB (should not happen under normal circumstances)
+    // Equal counts are handled via date-based filtering below
     if (completed.length < dbTotalClears) {
       continue;
     }
@@ -140,6 +141,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       // Note: This is a heuristic since 'period' reflects instance start time, not completion time.
       // For the character-switching case, this ensures we process recent instances even if they
       // were started before the cutoff date but completed after.
+      // Assumption: Newer instances (by start time) are more likely to be new completions.
+      // Edge case: If old instances are completed out of order, they might be missed in this pass
+      // but will be caught in the next sync when the count increases further.
       const newCount = completed.length - dbTotalClears;
       newActivities = completed.slice(-newCount);
     } else if (cutoffDate) {
@@ -209,7 +213,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    // Skip if no new activities by count
+    // Skip if fewer completions than DB (should not happen under normal circumstances)
+    // Equal counts are handled via date-based filtering below
     if (completed.length < dbTotalClears) {
       continue;
     }
@@ -230,6 +235,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       // Note: This is a heuristic since 'period' reflects instance start time, not completion time.
       // For the character-switching case, this ensures we process recent instances even if they
       // were started before the cutoff date but completed after.
+      // Assumption: Newer instances (by start time) are more likely to be new completions.
+      // Edge case: If old instances are completed out of order, they might be missed in this pass
+      // but will be caught in the next sync when the count increases further.
       const newCount = completed.length - dbTotalClears;
       newActivities = completed.slice(-newCount);
     } else if (cutoffDate) {
