@@ -128,13 +128,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
     `).bind(job.clanId, job.membershipId, dungeonHash).first();
 
-    let cutoffDate: Date | null = null;
-    if (prevRow && (prevRow as any).last_processed_date) {
-      cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
-    }
-
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
     console.log(`[MemberJob:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
@@ -151,16 +144,27 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     });
 
     let newActivities = completed;
-    if (cutoffDate) {
-      newActivities = completed.filter(a => {
-        try {
-          const actDate = new Date(a.period);
-          return actDate.getTime() > cutoffDate!.getTime();
-        } catch {
-          return true;
-        }
-      });
-      console.log(`[MemberJob:${dungeon.displayName}] After date filter: ${newActivities.length} new activities (cutoff: ${cutoffDate.toISOString()})`);
+    // Only use cutoff date if we have successfully processed clears before
+    // Otherwise, process all activities (e.g., when total_clears=0 but last_processed_date exists from failed attempts)
+    if (dbTotalClears > 0) {
+      let cutoffDate: Date | null = null;
+      if (prevRow && (prevRow as any).last_processed_date) {
+        cutoffDate = new Date((prevRow as any).last_processed_date);
+      } else if (job.lastProcessedDate) {
+        cutoffDate = new Date(job.lastProcessedDate);
+      }
+
+      if (cutoffDate) {
+        newActivities = completed.filter(a => {
+          try {
+            const actDate = new Date(a.period);
+            return actDate.getTime() > cutoffDate!.getTime();
+          } catch {
+            return true;
+          }
+        });
+        console.log(`[MemberJob:${dungeon.displayName}] After date filter: ${newActivities.length} new activities (cutoff: ${cutoffDate.toISOString()})`);
+      }
     }
 
     if (newActivities.length === 0) {
@@ -213,13 +217,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
     `).bind(job.clanId, job.membershipId, dungeonHash).first();
 
-    let cutoffDate: Date | null = null;
-    if (prevRow && (prevRow as any).last_processed_date) {
-      cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
-    }
-
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
     console.log(`[MemberJob:Queue:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
@@ -238,16 +235,27 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     // Filter to new activities after cutoff
     let newActivities = completed;
-    if (cutoffDate) {
-      newActivities = completed.filter(a => {
-        try {
-          const actDate = new Date(a.period);
-          return actDate.getTime() > cutoffDate!.getTime();
-        } catch {
-          return true;
-        }
-      });
-      console.log(`[MemberJob:Queue:${dungeon.displayName}] After date filter: ${newActivities.length} new activities (cutoff: ${cutoffDate.toISOString()})`);
+    // Only use cutoff date if we have successfully processed clears before
+    // Otherwise, process all activities (e.g., when total_clears=0 but last_processed_date exists from failed attempts)
+    if (dbTotalClears > 0) {
+      let cutoffDate: Date | null = null;
+      if (prevRow && (prevRow as any).last_processed_date) {
+        cutoffDate = new Date((prevRow as any).last_processed_date);
+      } else if (job.lastProcessedDate) {
+        cutoffDate = new Date(job.lastProcessedDate);
+      }
+
+      if (cutoffDate) {
+        newActivities = completed.filter(a => {
+          try {
+            const actDate = new Date(a.period);
+            return actDate.getTime() > cutoffDate!.getTime();
+          } catch {
+            return true;
+          }
+        });
+        console.log(`[MemberJob:Queue:${dungeon.displayName}] After date filter: ${newActivities.length} new activities (cutoff: ${cutoffDate.toISOString()})`);
+      }
     }
 
     if (newActivities.length === 0) {
