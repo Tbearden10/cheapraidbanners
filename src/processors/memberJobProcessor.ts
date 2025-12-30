@@ -139,10 +139,10 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     console.log(`[MemberJob:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
 
-    if (completed.length <= dbTotalClears) {
-      console.log(`[MemberJob:${dungeon.displayName}] Skipping - no new activities (fetched <= DB)`);
-      continue;
-    }
+    // IMPORTANT: Don't skip based on count comparison alone!
+    // For users with many clears (9000+), the Bungie API may only return ~1000 activities
+    // due to API limits. We must rely on date filtering to find new activities.
+    // Removed check: if (completed.length <= dbTotalClears) { continue; }
 
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
@@ -224,10 +224,10 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     console.log(`[MemberJob:Queue:${dungeon.displayName}] DB clears: ${dbTotalClears}, Fetched completed: ${completed.length}`);
 
-    if (completed.length <= dbTotalClears) {
-      console.log(`[MemberJob:Queue:${dungeon.displayName}] Skipping - no new activities (fetched <= DB)`);
-      continue;
-    }
+    // IMPORTANT: Don't skip based on count comparison alone!
+    // For users with many clears (9000+), the Bungie API may only return ~1000 activities
+    // due to API limits. We must rely on date filtering to find new activities.
+    // Removed check: if (completed.length <= dbTotalClears) { continue; }
 
     // Sort by period ascending (oldest first)
     completed.sort((a, b) => {
