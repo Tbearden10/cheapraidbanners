@@ -57,15 +57,6 @@ async function writeIncremental(env: Env, data: {
 }): Promise<void> {
   const now = Date.now();
   
-  // NOTE: This function is called by queue workers and should be idempotent.
-  // However, there's a small edge case where if the worker times out AFTER this write
-  // completes but BEFORE ack(), the queue will retry and double-count.
-  // In practice, this is rare because:
-  // 1. The write is fast (< 100ms)
-  // 2. Workers have a 30s timeout
-  // 3. Clan aggregate stats are periodically recomputed from member stats, fixing any drift
-  // Future improvement: Add a processed_batches table to track batch IDs for true idempotency
-  
   // Update member stats only - clan aggregates will be recomputed later
   await env.DB.prepare(`
     INSERT INTO member_dungeon_stats (
@@ -101,6 +92,15 @@ async function writeIncremental(env: Env, data: {
 export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promise<void> {
   const startTime = Date.now();
   console.log(`[StatsQueue] Processing ${job.activities.length} PGCRs (${job.jobId})`);
+
+  // NOTE: This function is called by queue workers and should be idempotent.
+  // However, there's a small edge case where if the worker times out AFTER writeIncremental
+  // completes but BEFORE the queue message is acked, the queue will retry and double-count.
+  // In practice, this is rare because:
+  // 1. Database writes are fast (< 100ms)
+  // 2. Workers have a 30s CPU time limit
+  // 3. Clan aggregate stats are periodically recomputed from member stats, fixing any drift
+  // Future improvement: Add a processed_batches table to track batch IDs for true idempotency
 
   let fullClearsFound = 0;
   let totalPlaytime = 0;
@@ -161,6 +161,11 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
     try {
       const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.coordinatorId);
       const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
+      
+      // Validate batchIndex is present
+      if (job.batchIndex === undefined) {
+        console.warn('[StatsQueue] Missing batchIndex in job, using 0 as fallback');
+      }
       
       const response = await coordinator.fetch('https://internal/batch', {
         method: 'POST',
