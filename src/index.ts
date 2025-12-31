@@ -737,90 +737,143 @@ export default {
 
         try {
           const { ACTIVITY_REFERENCE_MAP } = await import('./constants/activityReferenceMap');
+          const { withRateLimit } = await import('./api/bungieApi');
           
-          console.log(`[Debug] Fetching completions for user ${membershipId}`);
+          console.log(`\n========================================`);
+          console.log(`[Debug] START - Fetching completions for user ${membershipId}`);
+          console.log(`[Debug] MembershipType: ${membershipType}, ClanId: ${clanId}`);
+          console.log(`========================================\n`);
 
-          // Track network requests
+          // Track network requests and rate limit retries
           const networkLog: any[] = [];
+          const rateLimitRetries: any[] = [];
           let totalPagesFetched = 0;
+          let totalRateLimitRetries = 0;
 
-          // Fetch characters
-          console.log(`[Debug:Network] Fetching characters for membershipId=${membershipId} membershipType=${membershipType}`);
+          // Fetch characters with rate limit handling
+          console.log(`[Debug:Step 1] Fetching characters for membershipId=${membershipId} membershipType=${membershipType}`);
           networkLog.push({
             type: 'fetchCharacters',
             url: `Destiny2/${membershipType}/Account/${membershipId}/Stats/`,
             timestamp: new Date().toISOString(),
           });
           
-          const characters = await fetchCharactersForMember(
-            membershipId,
-            Number(membershipType),
-            env.BUNGIE_API_KEY
-          );
+          const characters = await withRateLimit(
+            () => fetchCharactersForMember(membershipId, Number(membershipType), env.BUNGIE_API_KEY),
+            3
+          ).catch((err) => {
+            console.error(`[Debug:Step 1] FAILED - Error fetching characters:`, err);
+            throw err;
+          });
 
           if (!characters || characters.length === 0) {
+            console.log(`[Debug:Step 1] No characters found for user ${membershipId}`);
             return jsonResponse({ 
               error: 'No characters found',
               membershipId,
               membershipType,
               networkLog,
               totalPagesFetched,
+              rateLimitRetries,
             }, 404, request, env);
           }
 
-          console.log(`[Debug] Found ${characters.length} characters`);
+          console.log(`[Debug:Step 1] SUCCESS - Found ${characters.length} character(s)`);
+          characters.forEach((char: any, idx: number) => {
+            console.log(`  Character ${idx + 1}: ID=${char.characterId}, Deleted=${char.deleted || false}`);
+          });
 
-          // Fetch all activities for all characters
+          // Initialize activity storage
           const activitiesByChar: Record<string, any[]> = {};
           for (const char of characters) {
             activitiesByChar[char.characterId] = [];
           }
 
+          console.log(`\n[Debug:Step 2] Fetching activities for all characters`);
+          console.log(`[Debug:Step 2] Will fetch modes: [82=Dungeon, 2=Story], PageSize: 250`);
+
           const modes = [82, 2]; // Dungeon, Story
           for (const mode of modes) {
+            const modeName = mode === 82 ? 'Dungeon' : mode === 2 ? 'Story' : `Mode-${mode}`;
+            console.log(`\n[Debug:Step 2.${mode === 82 ? '1' : '2'}] Starting fetch for mode ${mode} (${modeName})`);
+            
             for (const char of characters) {
               let page = 0;
               const pageSize = 250;
+              let charTotalActivities = 0;
+              
+              console.log(`  [CharID: ${char.characterId}] Starting pagination...`);
               
               while (true) {
                 totalPagesFetched++;
                 const activityUrl = `Destiny2/${membershipType}/Account/${membershipId}/Character/${char.characterId}/Stats/Activities/?mode=${mode}&count=${pageSize}&page=${page}`;
                 
-                console.log(`[Debug:Network] Request #${totalPagesFetched} - Fetching activities: characterId=${char.characterId} mode=${mode} page=${page} pageSize=${pageSize}`);
-                networkLog.push({
+                console.log(`    Page ${page}: Fetching (Request #${totalPagesFetched})...`);
+                
+                const logEntry: any = {
                   type: 'fetchActivities',
                   requestNumber: totalPagesFetched,
                   url: activityUrl,
                   characterId: char.characterId,
                   mode,
+                  modeName,
                   page,
                   pageSize,
                   timestamp: new Date().toISOString(),
-                });
+                };
+                networkLog.push(logEntry);
                 
-                const activities = await fetchActivitiesForCharacter(
-                  Number(membershipType),
-                  membershipId,
-                  char.characterId,
-                  page,
-                  mode,
-                  pageSize,
-                  env.BUNGIE_API_KEY
+                // Fetch with rate limit handling and retry tracking
+                const activities = await withRateLimit(
+                  async () => {
+                    try {
+                      return await fetchActivitiesForCharacter(
+                        Number(membershipType),
+                        membershipId,
+                        char.characterId,
+                        page,
+                        mode,
+                        pageSize,
+                        env.BUNGIE_API_KEY
+                      );
+                    } catch (err: any) {
+                      // Check if it's a rate limit error
+                      if (err.message && (err.message.includes('429') || err.message.includes('rate limit'))) {
+                        totalRateLimitRetries++;
+                        const retryEntry = {
+                          requestNumber: totalPagesFetched,
+                          characterId: char.characterId,
+                          mode,
+                          page,
+                          timestamp: new Date().toISOString(),
+                          error: String(err),
+                        };
+                        rateLimitRetries.push(retryEntry);
+                        console.warn(`    Page ${page}: RATE LIMITED - Retrying (Retry #${totalRateLimitRetries})...`);
+                      }
+                      throw err;
+                    }
+                  },
+                  3
                 ).catch((err) => {
-                  console.warn(`[Debug:Network] Request #${totalPagesFetched} FAILED - characterId=${char.characterId} mode=${mode} page=${page}:`, err);
-                  networkLog[networkLog.length - 1].error = String(err);
+                  console.error(`    Page ${page}: FAILED - ${err}`);
+                  logEntry.error = String(err);
                   return [];
                 });
 
                 const activitiesCount = activities?.length || 0;
-                console.log(`[Debug:Network] Request #${totalPagesFetched} COMPLETE - Retrieved ${activitiesCount} activities`);
-                networkLog[networkLog.length - 1].activitiesRetrieved = activitiesCount;
+                charTotalActivities += activitiesCount;
+                console.log(`    Page ${page}: Retrieved ${activitiesCount} activities`);
+                logEntry.activitiesRetrieved = activitiesCount;
 
                 if (activities && activities.length > 0) {
                   activitiesByChar[char.characterId].push(...activities);
                 }
 
-                if (!activities || activities.length < pageSize) break;
+                if (!activities || activities.length < pageSize) {
+                  console.log(`  [CharID: ${char.characterId}] Pagination complete - Total: ${charTotalActivities} activities for mode ${mode}`);
+                  break;
+                }
                 page++;
               }
             }
@@ -830,37 +883,110 @@ export default {
             (sum, acts) => sum + acts.length, 0
           );
           
-          console.log(`[Debug:Network] Summary - Total pages fetched: ${totalPagesFetched}, Total activities retrieved: ${totalActivitiesFetched}`);
+          console.log(`\n[Debug:Step 2] COMPLETE - Fetched ${totalActivitiesFetched} total activities across all characters and modes`);
+          console.log(`[Debug:Step 2] Total pages fetched: ${totalPagesFetched}`);
+          if (totalRateLimitRetries > 0) {
+            console.log(`[Debug:Step 2] ⚠️  Rate limit retries: ${totalRateLimitRetries}`);
+          }
 
-          // Group by dungeon hash and deduplicate
+          // Print per-character activity counts
+          console.log(`\n[Debug:Step 3] Per-character activity counts:`);
+          for (const [charId, activities] of Object.entries(activitiesByChar)) {
+            console.log(`  CharID ${charId}: ${activities.length} activities`);
+          }
+
+          // Group by dungeon hash
+          console.log(`\n[Debug:Step 4] Grouping activities by dungeon hash...`);
           const activitiesByDungeon: Record<string, any[]> = {};
+          const ungroupedActivities: any[] = [];
+          const missingRefIdActivities: any[] = [];
+          let totalProcessed = 0;
+          
           for (const dungeon of ACTIVITY_REFERENCE_MAP) {
             activitiesByDungeon[dungeon.hash] = [];
           }
 
+          // Create a map of all known reference IDs for quick lookup
+          const knownReferenceIds = new Set<string>();
+          for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+            for (const refId of dungeon.referenceIds) {
+              knownReferenceIds.add(refId);
+            }
+          }
+
           for (const charId of Object.keys(activitiesByChar)) {
             for (const activity of activitiesByChar[charId]) {
+              totalProcessed++;
               const refId = String(activity?.activityDetails?.referenceId || '');
               
+              // Track activities without reference IDs
+              if (!refId) {
+                missingRefIdActivities.push({
+                  characterId: charId,
+                  period: activity.period,
+                  instanceId: activity?.activityDetails?.instanceId || activity?.instanceId,
+                });
+                continue;
+              }
+              
+              let grouped = false;
               for (const dungeon of ACTIVITY_REFERENCE_MAP) {
                 if (dungeon.referenceIds.includes(refId)) {
                   activitiesByDungeon[dungeon.hash].push({
                     ...activity,
                     characterId: charId,
                   });
+                  grouped = true;
                   break;
                 }
+              }
+              
+              // Track ungrouped activities that have a refId but don't match any dungeon
+              if (!grouped) {
+                ungroupedActivities.push({
+                  referenceId: refId,
+                  characterId: charId,
+                  period: activity.period,
+                  instanceId: activity?.activityDetails?.instanceId || activity?.instanceId,
+                });
               }
             }
           }
 
+          console.log(`[Debug:Step 4] Processed ${totalProcessed} activities (should match ${totalActivitiesFetched})`);
+          if (totalProcessed !== totalActivitiesFetched) {
+            console.warn(`[Debug:Step 4] ⚠️  MISMATCH: Processed ${totalProcessed} but fetched ${totalActivitiesFetched} (diff: ${totalActivitiesFetched - totalProcessed})`);
+          }
+
+          console.log(`[Debug:Step 4] Grouped activities into ${ACTIVITY_REFERENCE_MAP.length} dungeon categories`);
+          console.log(`[Debug:Step 4] Missing referenceId: ${missingRefIdActivities.length} activities`);
+          console.log(`[Debug:Step 4] Ungrouped (not matching any dungeon): ${ungroupedActivities.length} activities`);
+
           // Deduplicate per dungeon by instanceId (prefer completed)
+          console.log(`\n[Debug:Step 5] Deduplicating activities per dungeon...`);
+          const deduplicationStats: Record<string, { before: number; after: number; removed: number; missingInstanceId: number }> = {};
+          let totalBeforeDedup = 0;
+          let totalAfterDedup = 0;
+          let totalMissingInstanceIds = 0;
+          
           for (const hash of Object.keys(activitiesByDungeon)) {
+            const beforeCount = activitiesByDungeon[hash].length;
+            totalBeforeDedup += beforeCount;
+            
             const map = new Map<string, any>();
+            const instanceIdsWithoutId: any[] = [];
             
             for (const act of activitiesByDungeon[hash]) {
               const id = act.activityDetails?.instanceId || act.instanceId;
-              if (!id) continue;
+              
+              if (!id) {
+                instanceIdsWithoutId.push({
+                  characterId: act.characterId,
+                  period: act.period,
+                  referenceId: act.activityDetails?.referenceId,
+                });
+                continue;
+              }
               
               const existing = map.get(id);
               if (!existing) {
@@ -873,18 +999,65 @@ export default {
                 }
               }
             }
+            
             activitiesByDungeon[hash] = Array.from(map.values());
+            const afterCount = activitiesByDungeon[hash].length;
+            totalAfterDedup += afterCount;
+            totalMissingInstanceIds += instanceIdsWithoutId.length;
+            
+            deduplicationStats[hash] = {
+              before: beforeCount,
+              after: afterCount,
+              removed: beforeCount - afterCount - instanceIdsWithoutId.length,
+              missingInstanceId: instanceIdsWithoutId.length,
+            };
+            
+            if (instanceIdsWithoutId.length > 0) {
+              const dungeon = ACTIVITY_REFERENCE_MAP.find(d => d.hash === hash);
+              const dungeonName = dungeon?.displayName || hash;
+              console.warn(`[Debug:Step 5] ⚠️  ${dungeonName}: ${instanceIdsWithoutId.length} activities missing instanceId (EXCLUDED from results)`);
+            }
           }
 
-          // Build results per dungeon
+          console.log(`[Debug:Step 5] Deduplication summary: ${totalBeforeDedup} → ${totalAfterDedup} (removed ${totalBeforeDedup - totalAfterDedup - totalMissingInstanceIds} duplicates, ${totalMissingInstanceIds} missing instanceId)`);
+          
+          // Sanity check the activity flow
+          const totalInDungeons = totalAfterDedup;
+          const totalAccountedFor = totalInDungeons + ungroupedActivities.length + missingRefIdActivities.length + totalMissingInstanceIds;
+          console.log(`[Debug:Step 5] Activity flow check:`);
+          console.log(`  Fetched: ${totalActivitiesFetched}`);
+          console.log(`  In dungeons (after dedup): ${totalInDungeons}`);
+          console.log(`  Ungrouped (has refId, no match): ${ungroupedActivities.length}`);
+          console.log(`  Missing refId: ${missingRefIdActivities.length}`);
+          console.log(`  Missing instanceId (excluded): ${totalMissingInstanceIds}`);
+          console.log(`  Total accounted: ${totalAccountedFor}`);
+          if (totalAccountedFor !== totalActivitiesFetched) {
+            console.warn(`[Debug:Step 5] ⚠️  ACCOUNTING MISMATCH: Difference of ${totalActivitiesFetched - totalAccountedFor} activities!`);
+          }
+
+          // Build results per dungeon with detailed counts
+          console.log(`\n[Debug:Step 6] Building per-dungeon statistics...`);
           const dungeonResults = [];
           
           for (const dungeon of ACTIVITY_REFERENCE_MAP) {
             const dungeonHash = dungeon.hash;
             const activities = activitiesByDungeon[dungeonHash] || [];
             
+            // Count by reference ID
+            const countsByRefId: Record<string, number> = {};
+            for (const refId of dungeon.referenceIds) {
+              countsByRefId[refId] = 0;
+            }
+            for (const act of activities) {
+              const refId = String(act?.activityDetails?.referenceId || '');
+              if (countsByRefId.hasOwnProperty(refId)) {
+                countsByRefId[refId]++;
+              }
+            }
+            
             // Filter to completed only
             const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
+            const incomplete = activities.filter(a => a?.values?.completed?.basic?.value !== 1);
             
             // Sort by period
             completed.sort((a, b) => {
@@ -904,12 +1077,30 @@ export default {
             const dbFullClears = dbRow ? Number((dbRow as any).total_full_clears ?? 0) : 0;
             const dbLastProcessedDate = dbRow ? (dbRow as any).last_processed_date : null;
 
+            const dedupInfo = deduplicationStats[dungeonHash] || { before: 0, after: 0, removed: 0 };
+
+            console.log(`  ${dungeon.displayName} (${dungeonHash}):`);
+            console.log(`    Raw activities: ${dedupInfo.before}`);
+            console.log(`    After dedup: ${dedupInfo.after} (removed ${dedupInfo.removed} duplicates)`);
+            console.log(`    Completed: ${completed.length}, Incomplete: ${incomplete.length}`);
+            console.log(`    DB Clears: ${dbTotalClears}, DB Full Clears: ${dbFullClears}`);
+            console.log(`    Counts by Reference ID:`);
+            for (const [refId, count] of Object.entries(countsByRefId)) {
+              if (count > 0) {
+                console.log(`      RefID ${refId}: ${count} activities`);
+              }
+            }
+
             dungeonResults.push({
               dungeonName: dungeon.displayName,
               dungeonHash,
+              referenceIds: dungeon.referenceIds,
+              deduplication: dedupInfo,
+              countsByReferenceId: countsByRefId,
               bungie: {
                 totalActivities: activities.length,
                 completedActivities: completed.length,
+                incompleteActivities: incomplete.length,
                 oldestCompletion: completed.length > 0 ? completed[0].period : null,
                 newestCompletion: completed.length > 0 ? completed[completed.length - 1].period : null,
               },
@@ -926,8 +1117,75 @@ export default {
                 instanceId: a.activityDetails?.instanceId || a.instanceId,
                 period: a.period,
                 characterId: (a as any).characterId,
+                referenceId: a.activityDetails?.referenceId,
               })),
             });
+          }
+
+          // Print ungrouped activities summary
+          if (ungroupedActivities.length > 0) {
+            console.log(`\n[Debug:Step 7] Ungrouped Activities (${ungroupedActivities.length} total):`);
+            
+            // Group ungrouped by reference ID
+            const ungroupedByRefId: Record<string, number> = {};
+            for (const act of ungroupedActivities) {
+              const refId = act.referenceId;
+              ungroupedByRefId[refId] = (ungroupedByRefId[refId] || 0) + 1;
+            }
+            
+            for (const [refId, count] of Object.entries(ungroupedByRefId)) {
+              console.log(`  RefID ${refId}: ${count} activities`);
+            }
+            
+            // Show a few examples
+            console.log(`  Sample ungrouped activities (first 5):`);
+            ungroupedActivities.slice(0, 5).forEach((act, idx) => {
+              console.log(`    ${idx + 1}. RefID: ${act.referenceId}, CharID: ${act.characterId}, Period: ${act.period}`);
+            });
+          } else {
+            console.log(`\n[Debug:Step 7] No ungrouped activities found - all activities matched known dungeons`);
+          }
+
+          // Final summary
+          const totalBungieCompletions = dungeonResults.reduce((sum, d) => sum + d.bungie.completedActivities, 0);
+          const totalDbClears = dungeonResults.reduce((sum, d) => sum + d.database.totalClears, 0);
+          const needsSyncCount = dungeonResults.filter(d => d.comparison.needsSync).length;
+
+          console.log(`\n========================================`);
+          console.log(`[Debug] SUMMARY`);
+          console.log(`========================================`);
+          console.log(`Total activities fetched from Bungie: ${totalActivitiesFetched}`);
+          console.log(`Total pages fetched: ${totalPagesFetched}`);
+          console.log(`Total API requests: ${networkLog.length}`);
+          console.log(`Rate limit retries: ${totalRateLimitRetries}`);
+          console.log(`---`);
+          console.log(`Activities processed: ${totalProcessed}`);
+          console.log(`Missing referenceId: ${missingRefIdActivities.length}`);
+          console.log(`Missing instanceId (excluded from dedup): ${totalMissingInstanceIds}`);
+          console.log(`Ungrouped activities (has refId, no match): ${ungroupedActivities.length}`);
+          console.log(`---`);
+          console.log(`Before deduplication: ${totalBeforeDedup}`);
+          console.log(`After deduplication: ${totalAfterDedup}`);
+          console.log(`Duplicates removed: ${totalBeforeDedup - totalAfterDedup - totalMissingInstanceIds}`);
+          console.log(`---`);
+          console.log(`Total Bungie completions (all dungeons): ${totalBungieCompletions}`);
+          console.log(`Total DB clears (all dungeons): ${totalDbClears}`);
+          console.log(`Dungeons needing sync: ${needsSyncCount}`);
+          console.log(`Missing in DB: ${totalBungieCompletions - totalDbClears}`);
+          console.log(`========================================\n`);
+
+          // Group ungrouped by reference ID for response
+          const ungroupedByRefId: Record<string, number> = {};
+          for (const act of ungroupedActivities) {
+            const refId = act.referenceId;
+            ungroupedByRefId[refId] = (ungroupedByRefId[refId] || 0) + 1;
+          }
+          
+          // Group missing refId activities for response
+          const missingRefIdByChar: Record<string, number> = {};
+          for (const act of missingRefIdActivities) {
+            const charId = act.characterId;
+            missingRefIdByChar[charId] = (missingRefIdByChar[charId] || 0) + 1;
           }
 
           return jsonResponse({
@@ -936,24 +1194,46 @@ export default {
             clanId,
             characters: characters.map((c: any) => ({
               characterId: c.characterId,
-              class: c.classType === 0 ? 'Titan' : c.classType === 1 ? 'Hunter' : c.classType === 2 ? 'Warlock' : 'Unknown',
-              light: c.light,
+              deleted: c.deleted || false,
+              activitiesFetched: activitiesByChar[c.characterId]?.length || 0,
             })),
             totalActivitiesFetched,
             networkSummary: {
               totalPagesFetched,
               totalRequests: networkLog.length,
+              totalRateLimitRetries,
               requestsByType: {
                 fetchCharacters: networkLog.filter(r => r.type === 'fetchCharacters').length,
                 fetchActivities: networkLog.filter(r => r.type === 'fetchActivities').length,
               },
             },
+            rateLimitRetries,
             networkLog,
+            missingRefIdActivities: {
+              count: missingRefIdActivities.length,
+              byCharacterId: missingRefIdByChar,
+              samples: missingRefIdActivities.slice(0, 10).map(a => ({
+                characterId: a.characterId,
+                period: a.period,
+                instanceId: a.instanceId,
+              })),
+            },
+            ungroupedActivities: {
+              count: ungroupedActivities.length,
+              byReferenceId: ungroupedByRefId,
+              samples: ungroupedActivities.slice(0, 10).map(a => ({
+                referenceId: a.referenceId,
+                characterId: a.characterId,
+                period: a.period,
+                instanceId: a.instanceId,
+              })),
+            },
             dungeons: dungeonResults,
             summary: {
-              totalBungieCompletions: dungeonResults.reduce((sum, d) => sum + d.bungie.completedActivities, 0),
-              totalDbClears: dungeonResults.reduce((sum, d) => sum + d.database.totalClears, 0),
-              needsSyncCount: dungeonResults.filter(d => d.comparison.needsSync).length,
+              totalBungieCompletions,
+              totalDbClears,
+              needsSyncCount,
+              missingInDb: totalBungieCompletions - totalDbClears,
             },
           }, 200, request, env);
         } catch (err) {
