@@ -727,7 +727,6 @@ export default {
       if (url.pathname === '/debug/user-completions' && request.method === 'GET') {
         const membershipId = url.searchParams.get('membershipId');
         const membershipType = url.searchParams.get('membershipType');
-        const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
 
         if (!membershipId || !membershipType) {
           return jsonResponse({ 
@@ -799,10 +798,10 @@ export default {
           
           console.log(`[Debug] Fetched ${totalActivitiesFetched} total activities`);
 
-          // Group by dungeon hash and deduplicate
-          const activitiesByDungeon: Record<string, any[]> = {};
+          // Group by dungeon hash (before deduplication)
+          const activitiesByDungeonBeforeDedup: Record<string, any[]> = {};
           for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-            activitiesByDungeon[dungeon.hash] = [];
+            activitiesByDungeonBeforeDedup[dungeon.hash] = [];
           }
 
           for (const charId of Object.keys(activitiesByChar)) {
@@ -811,7 +810,7 @@ export default {
               
               for (const dungeon of ACTIVITY_REFERENCE_MAP) {
                 if (dungeon.referenceIds.includes(refId)) {
-                  activitiesByDungeon[dungeon.hash].push({
+                  activitiesByDungeonBeforeDedup[dungeon.hash].push({
                     ...activity,
                     characterId: charId,
                   });
@@ -821,11 +820,28 @@ export default {
             }
           }
 
-          // Deduplicate per dungeon by instanceId (prefer completed)
-          for (const hash of Object.keys(activitiesByDungeon)) {
-            const map = new Map<string, any>();
+          // Build results per dungeon with deduplication tracking
+          const dungeonResults = [];
+          
+          for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+            const dungeonHash = dungeon.hash;
+            const activitiesBeforeDedup = activitiesByDungeonBeforeDedup[dungeonHash] || [];
             
-            for (const act of activitiesByDungeon[hash]) {
+            // Track instance IDs before deduplication
+            const instanceIdsBeforeDedup = activitiesBeforeDedup.map(a => 
+              a.activityDetails?.instanceId || a.instanceId
+            ).filter(id => id);
+            
+            // Count completed activities before deduplication
+            const completedBeforeDedup = activitiesBeforeDedup.filter(
+              a => a?.values?.completed?.basic?.value === 1
+            );
+            
+            // Deduplicate by instanceId (prefer completed)
+            const map = new Map<string, any>();
+            const duplicateInstances: string[] = [];
+            
+            for (const act of activitiesBeforeDedup) {
               const id = act.activityDetails?.instanceId || act.instanceId;
               if (!id) continue;
               
@@ -833,6 +849,7 @@ export default {
               if (!existing) {
                 map.set(id, act);
               } else {
+                duplicateInstances.push(id);
                 const existingCompleted = !!(existing?.values?.completed?.basic?.value === 1);
                 const newCompleted = !!(act?.values?.completed?.basic?.value === 1);
                 if (!existingCompleted && newCompleted) {
@@ -840,59 +857,42 @@ export default {
                 }
               }
             }
-            activitiesByDungeon[hash] = Array.from(map.values());
-          }
-
-          // Build results per dungeon
-          const dungeonResults = [];
-          
-          for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-            const dungeonHash = dungeon.hash;
-            const activities = activitiesByDungeon[dungeonHash] || [];
             
-            // Filter to completed only
-            const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
+            const activitiesAfterDedup = Array.from(map.values());
+            
+            // Filter to completed only after deduplication
+            const completedAfterDedup = activitiesAfterDedup.filter(
+              a => a?.values?.completed?.basic?.value === 1
+            );
             
             // Sort by period
-            completed.sort((a, b) => {
+            completedAfterDedup.sort((a, b) => {
               const ta = a.period ? new Date(a.period).getTime() : 0;
               const tb = b.period ? new Date(b.period).getTime() : 0;
               return ta - tb;
             });
 
-            // Get DB stats for comparison
-            const dbRow = await env.DB.prepare(`
-              SELECT total_clears, total_full_clears, last_processed_date
-              FROM member_dungeon_stats
-              WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
-            `).bind(clanId, membershipId, dungeonHash).first();
-
-            const dbTotalClears = dbRow ? Number((dbRow as any).total_clears ?? 0) : 0;
-            const dbFullClears = dbRow ? Number((dbRow as any).total_full_clears ?? 0) : 0;
-            const dbLastProcessedDate = dbRow ? (dbRow as any).last_processed_date : null;
-
             dungeonResults.push({
               dungeonName: dungeon.displayName,
               dungeonHash,
-              bungie: {
-                totalActivities: activities.length,
-                completedActivities: completed.length,
-                oldestCompletion: completed.length > 0 ? completed[0].period : null,
-                newestCompletion: completed.length > 0 ? completed[completed.length - 1].period : null,
+              counts: {
+                beforeDeduplication: {
+                  total: activitiesBeforeDedup.length,
+                  completed: completedBeforeDedup.length,
+                },
+                afterDeduplication: {
+                  total: activitiesAfterDedup.length,
+                  completed: completedAfterDedup.length,
+                },
+                duplicatesRemoved: activitiesBeforeDedup.length - activitiesAfterDedup.length,
               },
-              database: {
-                totalClears: dbTotalClears,
-                fullClears: dbFullClears,
-                lastProcessedDate: dbLastProcessedDate,
-              },
-              comparison: {
-                missingInDb: completed.length - dbTotalClears,
-                needsSync: completed.length > dbTotalClears,
-              },
-              recentCompletions: completed.slice(-5).map(a => ({
+              duplicateInstanceIds: Array.from(new Set(duplicateInstances)),
+              uniqueInstanceIds: Array.from(map.keys()),
+              recentCompletions: completedAfterDedup.slice(-5).map(a => ({
                 instanceId: a.activityDetails?.instanceId || a.instanceId,
                 period: a.period,
                 characterId: (a as any).characterId,
+                completed: a?.values?.completed?.basic?.value === 1,
               })),
             });
           }
@@ -900,7 +900,6 @@ export default {
           return jsonResponse({
             membershipId,
             membershipType: Number(membershipType),
-            clanId,
             characters: characters.map((c: any) => ({
               characterId: c.characterId,
               class: c.classType === 0 ? 'Titan' : c.classType === 1 ? 'Hunter' : c.classType === 2 ? 'Warlock' : 'Unknown',
@@ -909,9 +908,9 @@ export default {
             totalActivitiesFetched,
             dungeons: dungeonResults,
             summary: {
-              totalBungieCompletions: dungeonResults.reduce((sum, d) => sum + d.bungie.completedActivities, 0),
-              totalDbClears: dungeonResults.reduce((sum, d) => sum + d.database.totalClears, 0),
-              needsSyncCount: dungeonResults.filter(d => d.comparison.needsSync).length,
+              totalCompletedBeforeDedup: dungeonResults.reduce((sum, d) => sum + d.counts.beforeDeduplication.completed, 0),
+              totalCompletedAfterDedup: dungeonResults.reduce((sum, d) => sum + d.counts.afterDeduplication.completed, 0),
+              totalDuplicatesRemoved: dungeonResults.reduce((sum, d) => sum + d.counts.duplicatesRemoved, 0),
             },
           }, 200, request, env);
         } catch (err) {
