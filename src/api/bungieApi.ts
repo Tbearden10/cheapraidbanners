@@ -226,7 +226,7 @@ export async function fetchActivitiesForCharacter(
     // are expected and should return empty array rather than throwing:
     // - ErrorCode 1601: Character's activity history is private
     // - ErrorCode 1623: Character has no activity history  
-    // - ErrorCode 1601: API throttling or temporary issues
+    // - Other codes: API throttling, temporary issues, etc.
     // This is intentional behavior different from fetchCharactersForMember where
     // the character list must exist or the request is fundamentally invalid
     if (data.ErrorCode !== 1) {

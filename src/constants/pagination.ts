@@ -6,7 +6,7 @@
 /**
  * Maximum page number to fetch per character/mode combination (0-indexed)
  * Prevents infinite loops in case of API issues
- * e.g., MAX_PAGES_PER_CHARACTER = 100 means we'll fetch pages 0-99
+ * With MAX_PAGES_PER_CHARACTER = 99, we'll fetch pages 0-99 (100 pages total)
  */
 export const MAX_PAGES_PER_CHARACTER = 99;
 
