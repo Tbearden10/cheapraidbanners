@@ -125,6 +125,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   let totalBeforeDedup = 0;
   let totalAfterDedup = 0;
   let totalDuplicatesRemoved = 0;
+  let characterSwitchingInstances = 0;
   
   for (const hash of Object.keys(activitiesByDungeon)) {
     const beforeCount = activitiesByDungeon[hash].length;
@@ -148,12 +149,24 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       if (!existing) {
         map.set(id, act);
       } else {
-        // Prefer completed activities
-        const existingCompleted = !!(existing?.values?.completed?.basic?.value === 1);
-        const newCompleted = !!(act?.values?.completed?.basic?.value === 1);
-        if (!existingCompleted && newCompleted) {
+        // Always prefer completed activities over incomplete ones
+        // This handles cases where a user leaves an instance on one character
+        // and rejoins on another character to complete it
+        const existingCompleted = existing?.values?.completed?.basic?.value === 1;
+        const newCompleted = act?.values?.completed?.basic?.value === 1;
+        
+        if (newCompleted && !existingCompleted) {
+          // New activity is completed, existing is not - replace with completed one
+          console.log(`[MemberJob] Character switching detected for instance ${id}: replacing incomplete (char: ${existing.characterId}) with completed (char: ${act.characterId})`);
+          characterSwitchingInstances++;
           map.set(id, act);
+        } else if (existingCompleted && !newCompleted) {
+          // Existing is completed, new is not - keep completed one
+          console.log(`[MemberJob] Character switching detected for instance ${id}: keeping completed (char: ${existing.characterId}) over incomplete (char: ${act.characterId})`);
+          characterSwitchingInstances++;
+          // No action needed, keep existing
         }
+        // If both have same completion status, keep the first one (existing)
       }
     }
     
@@ -176,6 +189,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   }
   
   console.log(`[MemberJob] Deduplication summary: ${totalBeforeDedup} → ${totalAfterDedup} (removed ${totalDuplicatesRemoved} duplicates)`);
+  if (characterSwitchingInstances > 0) {
+    console.log(`[MemberJob] 📝 Detected ${characterSwitchingInstances} instance(s) with character switching (completed on different character)`);
+  }
   
   // Sanity check: compare to fetched total
   const totalGrouped = totalAfterDedup + ungroupedActivities.length + missingRefIdActivities.length;
