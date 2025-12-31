@@ -740,7 +740,18 @@ export default {
           
           console.log(`[Debug] Fetching completions for user ${membershipId}`);
 
+          // Track network requests
+          const networkLog: any[] = [];
+          let totalPagesFetched = 0;
+
           // Fetch characters
+          console.log(`[Debug:Network] Fetching characters for membershipId=${membershipId} membershipType=${membershipType}`);
+          networkLog.push({
+            type: 'fetchCharacters',
+            url: `Destiny2/${membershipType}/Account/${membershipId}/Stats/`,
+            timestamp: new Date().toISOString(),
+          });
+          
           const characters = await fetchCharactersForMember(
             membershipId,
             Number(membershipType),
@@ -751,7 +762,9 @@ export default {
             return jsonResponse({ 
               error: 'No characters found',
               membershipId,
-              membershipType 
+              membershipType,
+              networkLog,
+              totalPagesFetched,
             }, 404, request, env);
           }
 
@@ -770,6 +783,21 @@ export default {
               const pageSize = 250;
               
               while (true) {
+                totalPagesFetched++;
+                const activityUrl = `Destiny2/${membershipType}/Account/${membershipId}/Character/${char.characterId}/Stats/Activities/?mode=${mode}&count=${pageSize}&page=${page}`;
+                
+                console.log(`[Debug:Network] Request #${totalPagesFetched} - Fetching activities: characterId=${char.characterId} mode=${mode} page=${page} pageSize=${pageSize}`);
+                networkLog.push({
+                  type: 'fetchActivities',
+                  requestNumber: totalPagesFetched,
+                  url: activityUrl,
+                  characterId: char.characterId,
+                  mode,
+                  page,
+                  pageSize,
+                  timestamp: new Date().toISOString(),
+                });
+                
                 const activities = await fetchActivitiesForCharacter(
                   Number(membershipType),
                   membershipId,
@@ -779,9 +807,14 @@ export default {
                   pageSize,
                   env.BUNGIE_API_KEY
                 ).catch((err) => {
-                  console.warn(`[Debug] Failed to fetch activities for char ${char.characterId} page ${page}:`, err);
+                  console.warn(`[Debug:Network] Request #${totalPagesFetched} FAILED - characterId=${char.characterId} mode=${mode} page=${page}:`, err);
+                  networkLog[networkLog.length - 1].error = String(err);
                   return [];
                 });
+
+                const activitiesCount = activities?.length || 0;
+                console.log(`[Debug:Network] Request #${totalPagesFetched} COMPLETE - Retrieved ${activitiesCount} activities`);
+                networkLog[networkLog.length - 1].activitiesRetrieved = activitiesCount;
 
                 if (activities && activities.length > 0) {
                   activitiesByChar[char.characterId].push(...activities);
@@ -797,7 +830,7 @@ export default {
             (sum, acts) => sum + acts.length, 0
           );
           
-          console.log(`[Debug] Fetched ${totalActivitiesFetched} total activities`);
+          console.log(`[Debug:Network] Summary - Total pages fetched: ${totalPagesFetched}, Total activities retrieved: ${totalActivitiesFetched}`);
 
           // Group by dungeon hash and deduplicate
           const activitiesByDungeon: Record<string, any[]> = {};
@@ -907,6 +940,15 @@ export default {
               light: c.light,
             })),
             totalActivitiesFetched,
+            networkSummary: {
+              totalPagesFetched,
+              totalRequests: networkLog.length,
+              requestsByType: {
+                fetchCharacters: networkLog.filter(r => r.type === 'fetchCharacters').length,
+                fetchActivities: networkLog.filter(r => r.type === 'fetchActivities').length,
+              },
+            },
+            networkLog,
             dungeons: dungeonResults,
             summary: {
               totalBungieCompletions: dungeonResults.reduce((sum, d) => sum + d.bungie.completedActivities, 0),
