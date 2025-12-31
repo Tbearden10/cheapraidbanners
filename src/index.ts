@@ -943,9 +943,9 @@ export default {
             console.log(`[Debug]   DB: ${dungeon.database.totalClears} total clears, ${dungeon.database.fullClears} full clears`);
             console.log(`[Debug]   Needs Sync: ${dungeon.comparison.needsSync} (missing ${dungeon.comparison.missingInDb} in DB)`);
             
-            // Accumulate totals
-            totalBungieCompletions += dungeon.bungie.completedActivities;
-            totalDbClears += dungeon.database.totalClears;
+            // Accumulate totals with defensive type safety
+            totalBungieCompletions += Number(dungeon.bungie.completedActivities) || 0;
+            totalDbClears += Number(dungeon.database.totalClears) || 0;
             if (dungeon.comparison.needsSync) dungeonsNeedingSync++;
           }
           
