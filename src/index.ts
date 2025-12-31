@@ -930,27 +930,26 @@ export default {
             });
           }
 
-          // Log aggregated stats per dungeon
+          // Log aggregated stats per dungeon and calculate totals in a single pass
           console.log(`[Debug] ==================== AGGREGATED STATS PER DUNGEON ====================`);
+          
+          let totalBungieCompletions = 0;
+          let totalDbClears = 0;
+          let dungeonsNeedingSync = 0;
+          
           for (const dungeon of dungeonResults) {
             console.log(`[Debug] ${dungeon.dungeonName} (${dungeon.dungeonHash}):`);
             console.log(`[Debug]   Bungie: ${dungeon.bungie.completedActivities} completions`);
             console.log(`[Debug]   DB: ${dungeon.database.totalClears} total clears, ${dungeon.database.fullClears} full clears`);
             console.log(`[Debug]   Needs Sync: ${dungeon.comparison.needsSync} (missing ${dungeon.comparison.missingInDb} in DB)`);
+            
+            // Accumulate totals
+            totalBungieCompletions += dungeon.bungie.completedActivities;
+            totalDbClears += dungeon.database.totalClears;
+            if (dungeon.comparison.needsSync) dungeonsNeedingSync++;
           }
+          
           console.log(`[Debug] ====================================================================`);
-          
-          // Calculate totals in a single pass for efficiency
-          let totalBungieCompletions = 0;
-          let totalDbClears = 0;
-          let dungeonsNeedingSync = 0;
-          
-          for (const d of dungeonResults) {
-            totalBungieCompletions += d.bungie.completedActivities;
-            totalDbClears += d.database.totalClears;
-            if (d.comparison.needsSync) dungeonsNeedingSync++;
-          }
-          
           console.log(`[Debug] TOTALS: ${totalBungieCompletions} Bungie completions, ${totalDbClears} DB clears, ${dungeonsNeedingSync} dungeons need sync`);
 
           return jsonResponse({
