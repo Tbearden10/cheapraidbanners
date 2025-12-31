@@ -5,6 +5,7 @@
 
 import type { Env, MemberJob } from '../types';
 import { ACTIVITY_REFERENCE_MAP } from '../constants/activityReferenceMap';
+import { MAX_PAGES_PER_CHARACTER, DEFAULT_PAGE_SIZE } from '../constants/pagination';
 import {
   fetchCharactersForMember,
   fetchActivitiesForCharacter,
@@ -334,7 +335,7 @@ async function fetchAllActivities(
   const modes = [82, 2]; // Dungeon, Story
 
   async function fetchAllPagesForCharacter(charId: string, mode: number) {
-    const pageSize = 250;
+    const pageSize = DEFAULT_PAGE_SIZE;
     let page = 0;
     let totalFetched = 0;
 
@@ -372,8 +373,8 @@ async function fetchAllActivities(
       await sleep(200);
       
       // Safety check to prevent infinite loops
-      if (page > 100) {
-        console.warn(`[MemberJob] WARNING: Reached page limit (100) for ${displayName || membershipId}, char ${charId}, mode ${mode}`);
+      if (page > MAX_PAGES_PER_CHARACTER) {
+        console.warn(`[MemberJob] WARNING: Reached page limit (${MAX_PAGES_PER_CHARACTER}) for ${displayName || membershipId}, char ${charId}, mode ${mode}`);
         break;
       }
     }

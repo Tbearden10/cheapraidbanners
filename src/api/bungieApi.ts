@@ -222,10 +222,15 @@ export async function fetchActivitiesForCharacter(
       console.log(`[BungieAPI] Activities count: ${data.Response?.activities?.length || 0}`);
     }
     
+    // Note: We don't throw on ErrorCode !== 1 for activities because some error codes
+    // (e.g., no activities found, privacy settings) are expected and should return empty array
     if (data.ErrorCode !== 1) {
       if (debug) {
         console.warn(`[BungieAPI] Bungie API error: ErrorCode=${data.ErrorCode}, Message=${data.Message}, ErrorStatus=${data.ErrorStatus}`);
       }
+      // Return empty array for non-fatal errors (e.g., no activities, privacy settings)
+      // This is intentional behavior different from fetchCharactersForMember
+      return [];
     }
     
     return data.Response?.activities || [];

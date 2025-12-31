@@ -16,6 +16,7 @@ import {
 import { getMembersList, upsertClanMember } from './db/queries';
 import { processMemberJob } from './processors/memberJobProcessor';
 import { processStatsQueueJob } from './processors/statsQueueProcessor';
+import { MAX_PAGES_PER_CHARACTER, DEFAULT_PAGE_SIZE } from './constants/pagination';
 
 
 // Export Durable Objects
@@ -777,7 +778,7 @@ export default {
             
             for (const char of characters) {
               let page = 0;
-              const pageSize = 250;
+              const pageSize = DEFAULT_PAGE_SIZE;
               let totalFetchedForChar = 0;
               
               console.log(`[Debug] Fetching activities for character ${char.characterId}, mode ${mode}...`);
@@ -820,8 +821,8 @@ export default {
                 page++;
                 
                 // Safety check to prevent infinite loops
-                if (page > 100) {
-                  console.warn(`[Debug] WARNING: Reached page limit (100) for char ${char.characterId}, mode ${mode}`);
+                if (page > MAX_PAGES_PER_CHARACTER) {
+                  console.warn(`[Debug] WARNING: Reached page limit (${MAX_PAGES_PER_CHARACTER}) for char ${char.characterId}, mode ${mode}`);
                   break;
                 }
               }
