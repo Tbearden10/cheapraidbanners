@@ -110,16 +110,29 @@ export async function enrichMemberWithEmblem(member: any, apiKey: string) {
 export async function fetchCharactersForMember(
   membershipId: string,
   membershipType: number,
-  apiKey: string
+  apiKey: string,
+  debug = false
 ) {
   const url = `https://www.bungie.net/Platform/Destiny2/${membershipType}/Account/${membershipId}/Stats/`;
+  
+  if (debug) {
+    console.log(`[BungieAPI] Fetching characters: membershipId=${membershipId}, membershipType=${membershipType}`);
+  }
+  
   const response = await fetchWithRetry(url, {
     headers: { 'X-API-Key': apiKey, Accept: 'application/json' }
   });
   
+  if (debug) {
+    console.log(`[BungieAPI] Response status: ${response.status} ${response.statusText}`);
+  }
+  
   const data = await response.json();
   
   if (data.ErrorCode !== 1) {
+    if (debug) {
+      console.error(`[BungieAPI] Bungie API error: ErrorCode=${data.ErrorCode}, Message=${data.Message}, ErrorStatus=${data.ErrorStatus}`);
+    }
     throw new Error(data.Message || 'Bungie API error');
   }
   
@@ -140,6 +153,10 @@ export async function fetchCharactersForMember(
     }));
   }
   
+  if (debug) {
+    console.log(`[BungieAPI] Found ${charactersArr.length} characters`);
+  }
+  
   return charactersArr.map((char) => ({
     characterId: char.characterId,
     membershipId,
@@ -155,19 +172,44 @@ export async function fetchActivitiesForCharacter(
   page: number,
   mode: number,
   pageSize: number,
-  apiKey: string
+  apiKey: string,
+  debug = false
 ): Promise<any[]> {
   const url = `https://www.bungie.net/Platform/Destiny2/${membershipType}/Account/${membershipId}/Character/${characterId}/Stats/Activities/?mode=${mode}&count=${pageSize}&page=${page}`;
   
   try {
+    if (debug) {
+      console.log(`[BungieAPI] Fetching activities: char=${characterId}, mode=${mode}, page=${page}, pageSize=${pageSize}`);
+    }
+    
     const response = await fetchWithRetry(url, {
       headers: { 'X-API-Key': apiKey, Accept: 'application/json' }
     });
     
+    if (debug) {
+      console.log(`[BungieAPI] Response status: ${response.status} ${response.statusText}`);
+    }
+    
     const data = await response.json();
+    
+    if (debug) {
+      console.log(`[BungieAPI] Response ErrorCode: ${data.ErrorCode}, Message: ${data.Message || 'none'}`);
+      console.log(`[BungieAPI] Activities count: ${data.Response?.activities?.length || 0}`);
+    }
+    
+    if (data.ErrorCode !== 1) {
+      if (debug) {
+        console.warn(`[BungieAPI] Bungie API error: ErrorCode=${data.ErrorCode}, Message=${data.Message}, ErrorStatus=${data.ErrorStatus}`);
+      }
+    }
+    
     return data.Response?.activities || [];
   } catch (error) {
-    console.error(`Failed to fetch activities for character ${characterId}:`, error);
+    if (debug) {
+      console.error(`[BungieAPI] Exception fetching activities for character ${characterId}:`, error);
+    } else {
+      console.error(`Failed to fetch activities for character ${characterId}:`, error);
+    }
     return [];
   }
 }

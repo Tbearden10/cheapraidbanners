@@ -738,16 +738,20 @@ export default {
         try {
           const { ACTIVITY_REFERENCE_MAP } = await import('./constants/activityReferenceMap');
           
-          console.log(`[Debug] Fetching completions for user ${membershipId}`);
+          console.log(`[Debug] ====== START DEBUG FOR USER ${membershipId} ======`);
+          console.log(`[Debug] MembershipType: ${membershipType}, ClanId: ${clanId}`);
 
           // Fetch characters
+          console.log(`[Debug] Fetching characters for user ${membershipId}...`);
           const characters = await fetchCharactersForMember(
             membershipId,
             Number(membershipType),
-            env.BUNGIE_API_KEY
+            env.BUNGIE_API_KEY,
+            true // Enable debug logging
           );
 
           if (!characters || characters.length === 0) {
+            console.warn(`[Debug] No characters found for user ${membershipId}`);
             return jsonResponse({ 
               error: 'No characters found',
               membershipId,
@@ -755,7 +759,9 @@ export default {
             }, 404, request, env);
           }
 
-          console.log(`[Debug] Found ${characters.length} characters`);
+          console.log(`[Debug] Found ${characters.length} characters:`, 
+            characters.map((c: any) => ({ id: c.characterId, deleted: c.deleted }))
+          );
 
           // Fetch all activities for all characters
           const activitiesByChar: Record<string, any[]> = {};
@@ -764,12 +770,21 @@ export default {
           }
 
           const modes = [82, 2]; // Dungeon, Story
+          console.log(`[Debug] Fetching activities for modes: ${modes.join(', ')}`);
+          
           for (const mode of modes) {
+            console.log(`[Debug] Starting fetch for mode ${mode}`);
+            
             for (const char of characters) {
               let page = 0;
               const pageSize = 250;
+              let totalFetchedForChar = 0;
+              
+              console.log(`[Debug] Fetching activities for character ${char.characterId}, mode ${mode}...`);
               
               while (true) {
+                console.log(`[Debug] Fetching page ${page} for char ${char.characterId}, mode ${mode}, pageSize ${pageSize}`);
+                
                 const activities = await fetchActivitiesForCharacter(
                   Number(membershipType),
                   membershipId,
@@ -777,19 +792,41 @@ export default {
                   page,
                   mode,
                   pageSize,
-                  env.BUNGIE_API_KEY
+                  env.BUNGIE_API_KEY,
+                  true // Enable debug logging
                 ).catch((err) => {
-                  console.warn(`[Debug] Failed to fetch activities for char ${char.characterId} page ${page}:`, err);
+                  console.error(`[Debug] Error fetching activities for char ${char.characterId} page ${page}:`, err);
+                  console.error(`[Debug] Error details:`, {
+                    name: err?.name,
+                    message: err?.message,
+                    stack: err?.stack,
+                  });
                   return [];
                 });
 
                 if (activities && activities.length > 0) {
+                  console.log(`[Debug] Page ${page} returned ${activities.length} activities for char ${char.characterId}`);
                   activitiesByChar[char.characterId].push(...activities);
+                  totalFetchedForChar += activities.length;
+                } else {
+                  console.log(`[Debug] Page ${page} returned 0 activities for char ${char.characterId} - stopping pagination`);
                 }
 
-                if (!activities || activities.length < pageSize) break;
+                if (!activities || activities.length < pageSize) {
+                  console.log(`[Debug] Stopping pagination for char ${char.characterId}, mode ${mode} at page ${page}. Total fetched: ${totalFetchedForChar}`);
+                  break;
+                }
+                
                 page++;
+                
+                // Safety check to prevent infinite loops
+                if (page > 100) {
+                  console.warn(`[Debug] WARNING: Reached page limit (100) for char ${char.characterId}, mode ${mode}`);
+                  break;
+                }
               }
+              
+              console.log(`[Debug] Completed fetch for char ${char.characterId}, mode ${mode}. Total: ${totalFetchedForChar} activities`);
             }
           }
 
@@ -797,9 +834,13 @@ export default {
             (sum, acts) => sum + acts.length, 0
           );
           
-          console.log(`[Debug] Fetched ${totalActivitiesFetched} total activities`);
+          console.log(`[Debug] Total activities fetched across all characters: ${totalActivitiesFetched}`);
+          console.log(`[Debug] Breakdown by character:`, 
+            Object.entries(activitiesByChar).map(([charId, acts]) => ({ charId, count: acts.length }))
+          );
 
           // Group by dungeon hash and deduplicate
+          console.log(`[Debug] Grouping activities by dungeon...`);
           const activitiesByDungeon: Record<string, any[]> = {};
           for (const dungeon of ACTIVITY_REFERENCE_MAP) {
             activitiesByDungeon[dungeon.hash] = [];
@@ -821,8 +862,14 @@ export default {
             }
           }
 
+          console.log(`[Debug] Activities grouped by dungeon:`,
+            Object.entries(activitiesByDungeon).map(([hash, acts]) => ({ hash, count: acts.length }))
+          );
+
           // Deduplicate per dungeon by instanceId (prefer completed)
+          console.log(`[Debug] Deduplicating activities by instanceId...`);
           for (const hash of Object.keys(activitiesByDungeon)) {
+            const beforeCount = activitiesByDungeon[hash].length;
             const map = new Map<string, any>();
             
             for (const act of activitiesByDungeon[hash]) {
@@ -841,9 +888,15 @@ export default {
               }
             }
             activitiesByDungeon[hash] = Array.from(map.values());
+            const afterCount = activitiesByDungeon[hash].length;
+            
+            if (beforeCount !== afterCount) {
+              console.log(`[Debug] Dungeon ${hash}: deduplicated from ${beforeCount} to ${afterCount} (removed ${beforeCount - afterCount} duplicates)`);
+            }
           }
 
           // Build results per dungeon
+          console.log(`[Debug] Building results per dungeon...`);
           const dungeonResults = [];
           
           for (const dungeon of ACTIVITY_REFERENCE_MAP) {
@@ -852,6 +905,8 @@ export default {
             
             // Filter to completed only
             const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
+            
+            console.log(`[Debug] Dungeon ${dungeon.displayName} (${dungeonHash}): ${activities.length} total activities, ${completed.length} completed`);
             
             // Sort by period
             completed.sort((a, b) => {
@@ -870,6 +925,8 @@ export default {
             const dbTotalClears = dbRow ? Number((dbRow as any).total_clears ?? 0) : 0;
             const dbFullClears = dbRow ? Number((dbRow as any).total_full_clears ?? 0) : 0;
             const dbLastProcessedDate = dbRow ? (dbRow as any).last_processed_date : null;
+
+            console.log(`[Debug] DB stats for ${dungeon.displayName}: totalClears=${dbTotalClears}, fullClears=${dbFullClears}, lastProcessed=${dbLastProcessedDate}`);
 
             dungeonResults.push({
               dungeonName: dungeon.displayName,
@@ -897,6 +954,8 @@ export default {
             });
           }
 
+          console.log(`[Debug] ====== END DEBUG FOR USER ${membershipId} ======`);
+
           return jsonResponse({
             membershipId,
             membershipType: Number(membershipType),
@@ -916,6 +975,11 @@ export default {
           }, 200, request, env);
         } catch (err) {
           console.error(`[HTTP:${requestId}] ❌ Error in debug endpoint:`, err);
+          console.error(`[Debug] Error details:`, {
+            name: (err as any)?.name,
+            message: (err as any)?.message,
+            stack: (err as any)?.stack,
+          });
           return jsonResponse({ 
             error: 'Failed to fetch user completions',
             message: (err as any)?.message ?? String(err)
