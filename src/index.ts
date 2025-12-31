@@ -939,7 +939,19 @@ export default {
             console.log(`[Debug]   Needs Sync: ${dungeon.comparison.needsSync} (missing ${dungeon.comparison.missingInDb} in DB)`);
           }
           console.log(`[Debug] ====================================================================`);
-          console.log(`[Debug] TOTALS: ${dungeonResults.reduce((sum, d) => sum + d.bungie.completedActivities, 0)} Bungie completions, ${dungeonResults.reduce((sum, d) => sum + d.database.totalClears, 0)} DB clears, ${dungeonResults.filter(d => d.comparison.needsSync).length} dungeons need sync`);
+          
+          // Calculate totals in a single pass for efficiency
+          let totalBungieCompletions = 0;
+          let totalDbClears = 0;
+          let dungeonsNeedingSync = 0;
+          
+          for (const d of dungeonResults) {
+            totalBungieCompletions += d.bungie.completedActivities;
+            totalDbClears += d.database.totalClears;
+            if (d.comparison.needsSync) dungeonsNeedingSync++;
+          }
+          
+          console.log(`[Debug] TOTALS: ${totalBungieCompletions} Bungie completions, ${totalDbClears} DB clears, ${dungeonsNeedingSync} dungeons need sync`);
 
           return jsonResponse({
             membershipId,
