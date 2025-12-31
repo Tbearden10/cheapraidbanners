@@ -283,8 +283,4 @@ export async function recomputeClanAggregateStats(
     overallResult?.active_member_count || 0,
     Date.now()
   ).run();
-
-  console.log(
-    `[DB] ✅ Recomputed clan aggregates for ${dungeonHashes.length} dungeons + overall`
-  );
 }

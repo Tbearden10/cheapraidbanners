@@ -28,14 +28,11 @@ export class RunTracker {
   constructor(state: DurableObjectState, env: any) {
     this.state = state;
     this.env = env;
-    console.log('[RunTracker] Instance created');
   }
 
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
-
-    console.log(`[RunTracker] Request: ${req.method} ${path}`);
 
     try {
       if (path === '/init' && req.method === 'POST') {
@@ -45,16 +42,10 @@ export class RunTracker {
         const expectedCount = Number(body.expectedCount) || 0;
         const key = `${RUN_KEY_PREFIX}${runId}`;
 
-        console.log(`[RunTracker:Init] Starting initialization`);
-        console.log(`[RunTracker:Init] - Run ID: ${runId}`);
-        console.log(`[RunTracker:Init] - Clan ID: ${clanId}`);
-        console.log(`[RunTracker:Init] - Expected Count: ${expectedCount}`);
-
         await this.state.blockConcurrencyWhile?.(async () => {
           let info = (await this.state.storage.get(key)) as RunInfo | undefined;
           
           if (!info) {
-            console.log(`[RunTracker:Init] Creating new run info`);
             info = { 
               runId, 
               clanId, 
@@ -65,36 +56,26 @@ export class RunTracker {
               done: false 
             };
           } else {
-            console.log(`[RunTracker:Init] Run already exists, updating expected count`);
-            console.log(`[RunTracker:Init] - Previous expected: ${info.expectedCount}`);
-            console.log(`[RunTracker:Init] - Previous completed: ${info.completedCount}`);
             info.expectedCount = expectedCount || info.expectedCount;
           }
           
           await this.state.storage.put(key, info);
-          console.log(`[RunTracker:Init] ✓ Run info saved`);
 
           // maintain run index for alarm cleanup
           let idx = (await this.state.storage.get(RUN_INDEX_KEY)) as Array<{ runId: string; createdAt: number }> | undefined;
           if (!idx) {
-            console.log(`[RunTracker:Init] Creating new run index`);
             idx = [];
           }
           
           if (!idx.find((r) => r.runId === runId)) {
             idx.push({ runId, createdAt: info.createdAt });
             await this.state.storage.put(RUN_INDEX_KEY, idx);
-            console.log(`[RunTracker:Init] ✓ Run added to index (total runs: ${idx.length})`);
-          } else {
-            console.log(`[RunTracker:Init] Run already in index`);
           }
 
           const alarmTime = Date.now() + ALARM_TTL_MS;
           await this.state.storage.setAlarm(alarmTime);
-          console.log(`[RunTracker:Init] ✓ Alarm set for ${new Date(alarmTime).toISOString()}`);
         });
 
-        console.log(`[RunTracker:Init] ✅ Initialization complete for run ${runId}`);
         return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
       }
 
@@ -104,48 +85,27 @@ export class RunTracker {
         const membershipId = String(body.membershipId);
         const key = `${RUN_KEY_PREFIX}${runId}`;
 
-        console.log(`[RunTracker:Complete] Processing completion`);
-        console.log(`[RunTracker:Complete] - Run ID: ${runId}`);
-        console.log(`[RunTracker:Complete] - Membership ID: ${membershipId}`);
-
         let doRecompute = false;
         let clanId = '';
 
         await this.state.blockConcurrencyWhile?.(async () => {
           const info = (await this.state.storage.get(key)) as RunInfo | undefined;
           
-          if (!info) {
-            console.log(`[RunTracker:Complete] ⚠️  Run not found: ${runId}`);
-            return;
-          }
-          
-          if (info.done) {
-            console.log(`[RunTracker:Complete] ⚠️  Run already completed: ${runId}`);
+          if (!info || info.done || info.seen[membershipId]) {
             return;
           }
           
           clanId = info.clanId;
-
-          if (info.seen[membershipId]) {
-            console.log(`[RunTracker:Complete] ⚠️  Member already recorded: ${membershipId}`);
-            return;
-          }
-
           info.seen[membershipId] = true;
           info.completedCount = (info.completedCount || 0) + 1;
-          
-          console.log(`[RunTracker:Complete] ✓ Member recorded`);
-          console.log(`[RunTracker:Complete] - Progress: ${info.completedCount}/${info.expectedCount}`);
-          console.log(`[RunTracker:Complete] - Percentage: ${((info.completedCount / info.expectedCount) * 100).toFixed(1)}%`);
           
           await this.state.storage.put(key, info);
           
           const alarmTime = Date.now() + ALARM_TTL_MS;
           await this.state.storage.setAlarm(alarmTime);
-          console.log(`[RunTracker:Complete] ✓ Alarm extended to ${new Date(alarmTime).toISOString()}`);
 
           if (info.completedCount >= (info.expectedCount || 0)) {
-            console.log(`[RunTracker:Complete] 🎉 All members complete! Marking run as done`);
+            console.log(`[RunTracker] All members complete for run ${runId}`);
             info.done = true;
             await this.state.storage.put(key, info);
             doRecompute = true;
@@ -154,25 +114,16 @@ export class RunTracker {
 
         if (doRecompute) {
           try {
-            console.log(`[RunTracker:Complete] 🔄 Starting clan aggregate recomputation`);
-            console.log(`[RunTracker:Complete] - Run ID: ${runId}`);
-            console.log(`[RunTracker:Complete] - Clan ID: ${clanId}`);
-            
-            const recomputeStart = Date.now();
             await recomputeClanAggregateStats(this.env.DB, clanId);
-            const recomputeDuration = Date.now() - recomputeStart;
-            
-            console.log(`[RunTracker:Complete] ✅ Recompute finished for clan ${clanId}`);
-            console.log(`[RunTracker:Complete] - Duration: ${recomputeDuration}ms (${(recomputeDuration / 1000).toFixed(2)}s)`);
+            console.log(`[RunTracker] Recompute complete for clan ${clanId}`);
           } catch (err) {
-            console.error(`[RunTracker:Complete] ❌ Recompute failed:`, err);
+            console.error(`[RunTracker] Recompute failed:`, err);
           }
         }
 
         return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
       }
 
-      console.log(`[RunTracker] ❌ 404 Not Found: ${path}`);
       return new Response('Not Found', { status: 404 });
       
     } catch (err) {
@@ -185,51 +136,33 @@ export class RunTracker {
   }
 
   async alarm() {
-    console.log(`[RunTracker:Alarm] Alarm triggered - starting cleanup`);
-    
     try {
       const idx = (await this.state.storage.get(RUN_INDEX_KEY)) as Array<{ runId: string; createdAt: number }> | undefined;
       
-      if (!idx || idx.length === 0) {
-        console.log(`[RunTracker:Alarm] No runs to clean up`);
-        return;
-      }
-      
-      console.log(`[RunTracker:Alarm] Found ${idx.length} run(s) in index`);
+      if (!idx || idx.length === 0) return;
       
       const now = Date.now();
       const remaining: Array<{ runId: string; createdAt: number }> = [];
-      let deletedCount = 0;
       
       for (const entry of idx) {
         const age = now - (entry.createdAt || 0);
         
         if (age > ALARM_TTL_MS) {
-          console.log(`[RunTracker:Alarm] Deleting stale run: ${entry.runId} (age: ${(age / 1000 / 60).toFixed(1)} minutes)`);
           try {
             await this.state.storage.delete(`${RUN_KEY_PREFIX}${entry.runId}`);
-            deletedCount++;
-          } catch (e) {
-            console.warn(`[RunTracker:Alarm] Failed to delete run ${entry.runId}:`, e);
-          }
+          } catch {}
         } else {
-          console.log(`[RunTracker:Alarm] Keeping run: ${entry.runId} (age: ${(age / 1000 / 60).toFixed(1)} minutes)`);
           remaining.push(entry);
         }
       }
       
       if (remaining.length === 0) {
-        console.log(`[RunTracker:Alarm] All runs cleaned, deleting index`);
         await this.state.storage.delete(RUN_INDEX_KEY);
       } else {
-        console.log(`[RunTracker:Alarm] Updating index with ${remaining.length} remaining run(s)`);
         await this.state.storage.put(RUN_INDEX_KEY, remaining);
       }
-      
-      console.log(`[RunTracker:Alarm] ✅ Cleanup complete: deleted ${deletedCount}, kept ${remaining.length}`);
-      
     } catch (e) {
-      console.error(`[RunTracker:Alarm] ❌ Cleanup error:`, e);
+      console.error(`[RunTracker] Cleanup error:`, e);
     }
   }
 }

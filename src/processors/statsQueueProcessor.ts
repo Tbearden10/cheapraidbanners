@@ -109,7 +109,6 @@ async function writeIncremental(env: Env, data: {
 
 export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promise<void> {
   const startTime = Date.now();
-  console.log(`[StatsQueue] Processing ${job.activities.length} PGCRs (${job.jobId})`);
 
   let fullClearsFound = 0;
   let totalPlaytime = 0;
@@ -188,8 +187,7 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
       const result = await response.json() as { complete: boolean; aggregated?: any };
       
       if (result.complete) {
-        console.log(`[StatsQueue] ✓ All batches complete for member ${job.membershipId}`);
-        // Optionally: trigger additional processing when all member batches are done
+        console.log(`[StatsQueue] All batches complete for ${job.membershipId}`);
       }
     } catch (err) {
       console.warn('[StatsQueue] Failed to report to MemberCoordinator:', err);
@@ -197,11 +195,9 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
   }
 
   const duration = Date.now() - startTime;
-  const reqPerSec = ((successCount) / (duration / 1000)).toFixed(1);
   const failureCount = job.activities.length - successCount;
   
-  console.log(
-    `[StatsQueue] ✓ ${successCount}/${job.activities.length} in ${(duration/1000).toFixed(1)}s ` +
-    `(${reqPerSec} req/s) | Clears: ${fullClearsFound} | Failed: ${failureCount}`
-  );
+  if (failureCount > 0) {
+    console.log(`[StatsQueue] ${successCount}/${job.activities.length} PGCRs processed in ${(duration/1000).toFixed(1)}s (${failureCount} failed)`);
+  }
 }

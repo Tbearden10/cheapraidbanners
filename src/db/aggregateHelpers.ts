@@ -83,8 +83,6 @@ export async function recomputeClanAggregateStats(
   db: D1Database,
   clanId: string
 ): Promise<void> {
-  console.log(`[Aggregate] Recomputing clan stats for ${clanId}...`);
-
   // Sum all member stats by dungeon, filtering by active members only
   const rows = await db.prepare(`
     SELECT 
@@ -188,5 +186,5 @@ export async function recomputeClanAggregateStats(
     `).bind(clanId).run();
   }
 
-  console.log(`[Aggregate] Recomputed ${aggregated.length} dungeons + overall for clan ${clanId}`);
+  console.log(`[Aggregate] Recomputed ${aggregated.length} dungeons for clan ${clanId}`);
 }
