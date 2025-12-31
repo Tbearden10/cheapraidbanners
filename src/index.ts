@@ -826,11 +826,11 @@ export default {
             }
           }
 
-          const totalActivitiesFetched = Object.values(activitiesByChar).reduce(
+          const totalRawActivitiesFetched = Object.values(activitiesByChar).reduce(
             (sum, acts) => sum + acts.length, 0
           );
           
-          console.log(`[Debug:Network] Summary - Total pages fetched: ${totalPagesFetched}, Total activities retrieved: ${totalActivitiesFetched}`);
+          console.log(`[Debug:Network] Summary - Total pages fetched: ${totalPagesFetched}, Total raw activities retrieved: ${totalRawActivitiesFetched}`);
 
           // Group by dungeon hash and deduplicate
           const activitiesByDungeon: Record<string, any[]> = {};
@@ -875,6 +875,11 @@ export default {
             }
             activitiesByDungeon[hash] = Array.from(map.values());
           }
+
+          // Calculate total deduplicated dungeon activities (after filtering and deduplication)
+          const totalActivitiesFetched = Object.values(activitiesByDungeon).reduce(
+            (sum, acts) => sum + acts.length, 0
+          );
 
           // Build results per dungeon
           const dungeonResults = [];

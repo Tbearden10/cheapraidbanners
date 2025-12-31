@@ -41,11 +41,11 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     env.BUNGIE_API_KEY
   );
 
-  const totalActivitiesFetched = Object.values(activitiesByChar).reduce(
+  const totalRawActivitiesFetched = Object.values(activitiesByChar).reduce(
     (sum, acts) => sum + acts.length, 0
   );
   
-  console.log(`[MemberJob] Fetched ${totalActivitiesFetched} activities for ${job.displayName}`);
+  console.log(`[MemberJob] Fetched ${totalRawActivitiesFetched} raw activities for ${job.displayName}`);
 
   // Group by dungeon hash
   const activitiesByDungeon: Record<string, any[]> = {};
@@ -91,6 +91,13 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     }
     activitiesByDungeon[hash] = Array.from(map.values());
   }
+
+  // Calculate total deduplicated dungeon activities (after filtering and deduplication)
+  const totalActivitiesFetched = Object.values(activitiesByDungeon).reduce(
+    (sum, acts) => sum + acts.length, 0
+  );
+  
+  console.log(`[MemberJob] After deduplication: ${totalActivitiesFetched} unique dungeon activities for ${job.displayName}`);
 
   // Calculate total batches across all dungeons
   let totalBatches = 0;
