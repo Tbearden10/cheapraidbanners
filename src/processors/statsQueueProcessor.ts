@@ -114,7 +114,14 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
   let fullClearsFound = 0;
   let totalPlaytime = 0;
   let latestActivityDate: string | null = null;
-  let successCount = 0;
+  let pgcrSuccessCount = 0;
+
+  // Track latest activity date from ALL activities, not just those with successful PGCR fetches
+  for (const activity of job.activities) {
+    if (activity.date && (!latestActivityDate || activity.date > latestActivityDate)) {
+      latestActivityDate = activity.date;
+    }
+  }
 
   // Process in batches of 30 (matching statsProcessor.ts)
   for (let i = 0; i < job.activities.length; i += PGCR_BATCH_SIZE) {
@@ -138,12 +145,9 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
     // Aggregate batch results
     for (const result of batchResults) {
       if (result.status === 'fulfilled' && result.value) {
-        successCount++;
+        pgcrSuccessCount++;
         if (result.value.isFullClear) fullClearsFound++;
         totalPlaytime += result.value.playtime;
-        if (result.value.date && (!latestActivityDate || result.value.date > latestActivityDate)) {
-          latestActivityDate = result.value.date;
-        }
       }
     }
     
@@ -153,13 +157,17 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
     }
   }
 
+  // Count ALL activities as clears, not just those with successful PGCR fetches
+  // Activities were already verified as completed before being sent to the queue
+  const totalClears = job.activities.length;
+
   // Write to database
   await writeIncremental(env, {
     clanId: job.clanId,
     membershipId: job.membershipId,
     membershipType: job.membershipType,
     dungeonHash: job.dungeonHash,
-    clearsDelta: successCount,
+    clearsDelta: totalClears,
     fullClearsDelta: fullClearsFound,
     playtimeDelta: totalPlaytime,
     lastProcessedDate: latestActivityDate,
@@ -177,7 +185,7 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
           batchId: job.jobId,
           dungeonHash: job.dungeonHash,
           batchIndex: parseInt(job.jobId.split('-').pop() || '0'),
-          clearsDelta: successCount,
+          clearsDelta: totalClears,
           fullClearsDelta: fullClearsFound,
           playtimeDelta: totalPlaytime,
           lastProcessedDate: latestActivityDate,
@@ -197,11 +205,11 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
   }
 
   const duration = Date.now() - startTime;
-  const reqPerSec = ((successCount) / (duration / 1000)).toFixed(1);
-  const failureCount = job.activities.length - successCount;
+  const reqPerSec = ((pgcrSuccessCount) / (duration / 1000)).toFixed(1);
+  const pgcrFailureCount = job.activities.length - pgcrSuccessCount;
   
   console.log(
-    `[StatsQueue] ✓ ${successCount}/${job.activities.length} in ${(duration/1000).toFixed(1)}s ` +
-    `(${reqPerSec} req/s) | Clears: ${fullClearsFound} | Failed: ${failureCount}`
+    `[StatsQueue] ✓ ${totalClears} clears processed (${pgcrSuccessCount} PGCRs fetched, ${pgcrFailureCount} PGCR failures) in ${(duration/1000).toFixed(1)}s ` +
+    `(${reqPerSec} PGCR req/s) | Full Clears: ${fullClearsFound}`
   );
 }
