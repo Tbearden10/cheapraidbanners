@@ -1,0 +1,60 @@
+{
+  "membershipId": "4611686018484449833",
+  "membershipType": 3,
+  "clanId": "12345",
+  "characters": [
+    {
+      "characterId": "2305843009260000001",
+      "deleted": false
+    }
+  ],
+  "activities": {
+    "2305843009260000001": {
+      "82": [
+        {
+          "activityDetails": {
+            "referenceId": "2727361621",
+            "instanceId": "111111111"
+          },
+          "period": "2024-12-01T10:00:00Z",
+          "values": {
+            "completed": {
+              "basic": {
+                "value": 1
+              }
+            }
+          }
+        },
+        {
+          "activityDetails": {
+            "referenceId": "2727361621",
+            "instanceId": "111111112"
+          },
+          "period": "2024-12-02T10:00:00Z",
+          "values": {
+            "completed": {
+              "basic": {
+                "value": 1
+              }
+            }
+          }
+        },
+        {
+          "activityDetails": {
+            "referenceId": "300092127",
+            "instanceId": "222222221"
+          },
+          "period": "2024-12-03T10:00:00Z",
+          "values": {
+            "completed": {
+              "basic": {
+                "value": 1
+              }
+            }
+          }
+        }
+      ],
+      "2": []
+    }
+  }
+}
