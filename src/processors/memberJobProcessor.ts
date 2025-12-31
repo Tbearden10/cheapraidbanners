@@ -33,6 +33,11 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     return;
   }
 
+  console.log(`[MemberJob] Found ${characters.length} character(s) for ${job.displayName}`);
+  characters.forEach((char: any, idx: number) => {
+    console.log(`  Character ${idx + 1}: ${char.characterId}${char.deleted ? ' (deleted)' : ''}`);
+  });
+
   // Fetch all activities
   const activitiesByChar = await fetchAllActivities(
     job.membershipType,
@@ -47,35 +52,97 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   
   console.log(`[MemberJob] Fetched ${totalActivitiesFetched} activities for ${job.displayName}`);
 
-  // Group by dungeon hash
+  // Group by dungeon hash and track ungrouped + missing refIds
   const activitiesByDungeon: Record<string, any[]> = {};
+  const ungroupedActivities: any[] = [];
+  const missingRefIdActivities: any[] = [];
+  let totalProcessed = 0;
+  
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
     activitiesByDungeon[dungeon.hash] = [];
   }
 
   for (const charId of Object.keys(activitiesByChar)) {
     for (const activity of activitiesByChar[charId]) {
+      totalProcessed++;
       const refId = String(activity?.activityDetails?.referenceId || '');
       
+      // Track activities without reference IDs
+      if (!refId) {
+        missingRefIdActivities.push({
+          characterId: charId,
+          period: activity.period,
+          instanceId: activity?.activityDetails?.instanceId || activity?.instanceId,
+        });
+        continue;
+      }
+      
+      let grouped = false;
       for (const dungeon of ACTIVITY_REFERENCE_MAP) {
         if (dungeon.referenceIds.includes(refId)) {
           activitiesByDungeon[dungeon.hash].push({
             ...activity,
             characterId: charId,
           });
+          grouped = true;
           break;
         }
+      }
+      
+      // Track ungrouped activities that have a refId but don't match any dungeon
+      if (!grouped) {
+        ungroupedActivities.push({
+          referenceId: refId,
+          characterId: charId,
+          period: activity.period,
+        });
       }
     }
   }
 
+  console.log(`[MemberJob] Processed ${totalProcessed} activities (should match ${totalActivitiesFetched})`);
+  if (totalProcessed !== totalActivitiesFetched) {
+    console.warn(`[MemberJob] ⚠️  MISMATCH: Processed ${totalProcessed} but fetched ${totalActivitiesFetched} (diff: ${totalActivitiesFetched - totalProcessed})`);
+  }
+
+  // Log missing refId activities
+  if (missingRefIdActivities.length > 0) {
+    console.log(`[MemberJob] ⚠️  ${missingRefIdActivities.length} activities missing referenceId (skipped)`);
+  }
+
+  // Log ungrouped activities summary if any exist
+  if (ungroupedActivities.length > 0) {
+    console.log(`[MemberJob] ⚠️  ${ungroupedActivities.length} ungrouped activities (not matching any dungeon)`);
+    const ungroupedByRefId: Record<string, number> = {};
+    for (const act of ungroupedActivities) {
+      ungroupedByRefId[act.referenceId] = (ungroupedByRefId[act.referenceId] || 0) + 1;
+    }
+    console.log(`[MemberJob] Ungrouped by RefID:`, ungroupedByRefId);
+  }
+
   // Dedupe per dungeon
+  console.log(`\n[MemberJob] Starting deduplication...`);
+  let totalBeforeDedup = 0;
+  let totalAfterDedup = 0;
+  let totalDuplicatesRemoved = 0;
+  
   for (const hash of Object.keys(activitiesByDungeon)) {
+    const beforeCount = activitiesByDungeon[hash].length;
+    totalBeforeDedup += beforeCount;
+    
     const map = new Map<string, any>();
+    const instanceIdsWithoutId: any[] = [];
     
     for (const act of activitiesByDungeon[hash]) {
       const id = act.activityDetails?.instanceId || act.instanceId;
-      if (!id) continue;
+      
+      if (!id) {
+        instanceIdsWithoutId.push({
+          characterId: act.characterId,
+          period: act.period,
+        });
+        continue;
+      }
       
       const existing = map.get(id);
       if (!existing) {
@@ -89,7 +156,37 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
         }
       }
     }
+    
     activitiesByDungeon[hash] = Array.from(map.values());
+    
+    const afterCount = activitiesByDungeon[hash].length;
+    totalAfterDedup += afterCount;
+    const removed = beforeCount - afterCount;
+    totalDuplicatesRemoved += removed;
+    
+    if (beforeCount > 0) {
+      const dungeon = ACTIVITY_REFERENCE_MAP.find(d => d.hash === hash);
+      const dungeonName = dungeon?.displayName || hash;
+      console.log(`[MemberJob] ${dungeonName}: ${afterCount} unique activities (${removed} duplicates removed${instanceIdsWithoutId.length > 0 ? `, ${instanceIdsWithoutId.length} missing instanceId` : ''})`);
+      
+      if (instanceIdsWithoutId.length > 0) {
+        console.warn(`[MemberJob] ⚠️  ${dungeonName} has ${instanceIdsWithoutId.length} activities without instanceId - these were EXCLUDED from deduplication`);
+      }
+    }
+  }
+  
+  console.log(`[MemberJob] Deduplication summary: ${totalBeforeDedup} → ${totalAfterDedup} (removed ${totalDuplicatesRemoved} duplicates)`);
+  
+  // Sanity check: compare to fetched total
+  const totalGrouped = totalAfterDedup + ungroupedActivities.length + missingRefIdActivities.length;
+  if (totalGrouped !== totalActivitiesFetched) {
+    console.warn(`[MemberJob] ⚠️  Activity accounting mismatch!`);
+    console.warn(`[MemberJob]   Fetched: ${totalActivitiesFetched}`);
+    console.warn(`[MemberJob]   After dedup: ${totalAfterDedup}`);
+    console.warn(`[MemberJob]   Ungrouped: ${ungroupedActivities.length}`);
+    console.warn(`[MemberJob]   Missing refId: ${missingRefIdActivities.length}`);
+    console.warn(`[MemberJob]   Total accounted: ${totalGrouped}`);
+    console.warn(`[MemberJob]   Difference: ${totalActivitiesFetched - totalGrouped}`);
   }
 
   // Calculate total batches across all dungeons
@@ -330,31 +427,57 @@ async function fetchAllActivities(
   for (const id of characterIds) out[id] = [];
 
   const modes = [82, 2]; // Dungeon, Story
+  let totalRateLimitRetries = 0;
+
+  console.log(`[MemberJob:Fetch] Starting activity fetch for ${characterIds.length} character(s)`);
+  characterIds.forEach((charId, idx) => {
+    console.log(`  Character ${idx + 1}: ${charId}`);
+  });
 
   async function fetchAllPagesForCharacter(charId: string, mode: number) {
     const pageSize = 250;
     let page = 0;
+    let charTotalActivities = 0;
 
     while (true) {
       const activities: any[] = await withRateLimit(
-        () =>
-          fetchActivitiesForCharacter(
-            membershipType,
-            membershipId,
-            charId,
-            page,
-            mode,
-            pageSize,
-            apiKey
-          ),
+        async () => {
+          try {
+            return await fetchActivitiesForCharacter(
+              membershipType,
+              membershipId,
+              charId,
+              page,
+              mode,
+              pageSize,
+              apiKey
+            );
+          } catch (err: any) {
+            // Check if it's a rate limit error
+            if (err.message && (err.message.includes('429') || err.message.includes('rate limit'))) {
+              totalRateLimitRetries++;
+              console.warn(`[MemberJob:Fetch] RATE LIMITED - CharID: ${charId}, Mode: ${mode}, Page: ${page} (Retry #${totalRateLimitRetries})`);
+            }
+            throw err;
+          }
+        },
         3
-      ).catch(() => []);
+      ).catch((err) => {
+        console.warn(`[MemberJob:Fetch] FAILED - CharID: ${charId}, Mode: ${mode}, Page: ${page}: ${err}`);
+        return [];
+      });
 
       if (activities && activities.length > 0) {
         out[charId].push(...activities);
+        charTotalActivities += activities.length;
       }
 
-      if (!activities || activities.length < pageSize) break;
+      if (!activities || activities.length < pageSize) {
+        if (charTotalActivities > 0) {
+          console.log(`[MemberJob:Fetch] CharID ${charId} Mode ${mode}: ${charTotalActivities} activities`);
+        }
+        break;
+      }
 
       page++;
       await sleep(200);
@@ -362,10 +485,19 @@ async function fetchAllActivities(
   }
 
   for (const mode of modes) {
+    const modeName = mode === 82 ? 'Dungeon' : mode === 2 ? 'Story' : `Mode-${mode}`;
+    console.log(`[MemberJob:Fetch] Fetching mode ${mode} (${modeName}) for all characters...`);
+    
     await Promise.all(
       characterIds.map((charId) => fetchAllPagesForCharacter(charId, mode))
     );
     await sleep(250);
+  }
+
+  const totalActivities = Object.values(out).reduce((sum, acts) => sum + acts.length, 0);
+  console.log(`[MemberJob:Fetch] Complete: ${totalActivities} total activities fetched`);
+  if (totalRateLimitRetries > 0) {
+    console.warn(`[MemberJob:Fetch] ⚠️  Total rate limit retries: ${totalRateLimitRetries}`);
   }
 
   return out;
