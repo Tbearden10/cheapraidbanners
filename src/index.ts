@@ -827,11 +827,6 @@ export default {
             const dungeonHash = dungeon.hash;
             const activitiesBeforeDedup = activitiesByDungeonBeforeDedup[dungeonHash] || [];
             
-            // Track instance IDs before deduplication
-            const instanceIdsBeforeDedup = activitiesBeforeDedup.map(a => 
-              a.activityDetails?.instanceId || a.instanceId
-            ).filter(id => id);
-            
             // Count completed activities before deduplication
             const completedBeforeDedup = activitiesBeforeDedup.filter(
               a => a?.values?.completed?.basic?.value === 1
@@ -892,7 +887,6 @@ export default {
                 instanceId: a.activityDetails?.instanceId || a.instanceId,
                 period: a.period,
                 characterId: (a as any).characterId,
-                completed: a?.values?.completed?.basic?.value === 1,
               })),
             });
           }
