@@ -123,7 +123,10 @@ class BungieAPIClient:
                     # Retry on 429 (rate limit) or 5xx (server errors)
                     if response.status == 429:
                         retry_after = response.headers.get('Retry-After', '2')
-                        wait_seconds = int(retry_after) if retry_after.isdigit() else 2
+                        try:
+                            wait_seconds = float(retry_after)
+                        except (ValueError, TypeError):
+                            wait_seconds = 2
                         
                         if attempt < retries:
                             print(f"Rate limited, waiting {wait_seconds}s...")
@@ -204,6 +207,11 @@ class BungieAPIClient:
 # ============================================================================
 # ACTIVITY PROCESSING PIPELINE
 # ============================================================================
+
+def is_activity_completed(activity: Dict[str, Any]) -> bool:
+    """Check if an activity is completed"""
+    return activity.get('values', {}).get('completed', {}).get('basic', {}).get('value') == 1
+
 
 async def fetch_all_activities(
     client: BungieAPIClient,
@@ -367,8 +375,8 @@ def deduplicate_activities(
                 activity_map[instance_id] = activity
             else:
                 # Prefer completed activities
-                existing_completed = existing.get('values', {}).get('completed', {}).get('basic', {}).get('value') == 1
-                new_completed = activity.get('values', {}).get('completed', {}).get('basic', {}).get('value') == 1
+                existing_completed = is_activity_completed(existing)
+                new_completed = is_activity_completed(activity)
                 
                 if not existing_completed and new_completed:
                     activity_map[instance_id] = activity
@@ -435,10 +443,7 @@ def filter_completed_activities(
     filtered_by_dungeon: Dict[str, List[Dict[str, Any]]] = {}
     
     for dungeon_hash, activities in activities_by_dungeon.items():
-        completed = [
-            a for a in activities
-            if a.get('values', {}).get('completed', {}).get('basic', {}).get('value') == 1
-        ]
+        completed = [a for a in activities if is_activity_completed(a)]
         
         filtered_by_dungeon[dungeon_hash] = completed
         
