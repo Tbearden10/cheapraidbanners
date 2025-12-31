@@ -223,7 +223,12 @@ export async function fetchActivitiesForCharacter(
     }
     
     // Note: We don't throw on ErrorCode !== 1 for activities because some error codes
-    // (e.g., no activities found, privacy settings) are expected and should return empty array
+    // are expected and should return empty array rather than throwing:
+    // - ErrorCode 1601: Character's activity history is private
+    // - ErrorCode 1623: Character has no activity history  
+    // - ErrorCode 1601: API throttling or temporary issues
+    // This is intentional behavior different from fetchCharactersForMember where
+    // the character list must exist or the request is fundamentally invalid
     if (data.ErrorCode !== 1) {
       if (debug) {
         console.warn(`[BungieAPI] Bungie API error: ErrorCode=${data.ErrorCode}, Message=${data.Message}, ErrorStatus=${data.ErrorStatus}`);
