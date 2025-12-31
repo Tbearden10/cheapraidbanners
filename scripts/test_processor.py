@@ -7,19 +7,21 @@ These tests validate the core logic without making actual API calls.
 
 import sys
 import os
-from datetime import datetime
 
-# Add parent directory to path to import the script
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# Add scripts directory to path for importing
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.append(script_dir)
 
-from scripts.process_bungie_activities import (
-    ACTIVITY_REFERENCE_MAP,
-    group_activities_by_dungeon,
-    deduplicate_activities,
-    filter_completed_activities,
-    create_batches,
-    MAX_BATCH_SIZE
-)
+# Import from process_bungie_activities module
+import process_bungie_activities as processor
+
+ACTIVITY_REFERENCE_MAP = processor.ACTIVITY_REFERENCE_MAP
+group_activities_by_dungeon = processor.group_activities_by_dungeon
+deduplicate_activities = processor.deduplicate_activities
+filter_completed_activities = processor.filter_completed_activities
+create_batches = processor.create_batches
+MAX_BATCH_SIZE = processor.MAX_BATCH_SIZE
 
 
 def test_activity_reference_map():

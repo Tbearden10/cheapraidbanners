@@ -123,11 +123,11 @@ class BungieAPIClient:
                     # Retry on 429 (rate limit) or 5xx (server errors)
                     if response.status == 429:
                         retry_after = response.headers.get('Retry-After', '2')
-                        wait_ms = int(retry_after) * 1000 if retry_after.isdigit() else 2000
+                        wait_seconds = int(retry_after) if retry_after.isdigit() else 2
                         
                         if attempt < retries:
-                            print(f"Rate limited, waiting {wait_ms}ms...")
-                            await asyncio.sleep(wait_ms / 1000)
+                            print(f"Rate limited, waiting {wait_seconds}s...")
+                            await asyncio.sleep(wait_seconds)
                             continue
                     
                     if 500 <= response.status < 600:
@@ -356,10 +356,9 @@ def deduplicate_activities(
             instance_id = activity_details.get('instanceId') or activity.get('instanceId')
             
             if not instance_id:
-                activities_without_id.append({
-                    'characterId': activity.get('characterId'),
-                    'period': activity.get('period'),
-                })
+                # Track but still include activities without instanceId
+                # They cannot be deduplicated but should remain in the output
+                activities_without_id.append(activity)
                 continue
             
             existing = activity_map.get(instance_id)
@@ -374,7 +373,8 @@ def deduplicate_activities(
                 if not existing_completed and new_completed:
                     activity_map[instance_id] = activity
         
-        activities_by_dungeon[dungeon_hash] = list(activity_map.values())
+        # Include both deduplicated activities and activities without instanceId
+        activities_by_dungeon[dungeon_hash] = list(activity_map.values()) + activities_without_id
         
         after_count = len(activities_by_dungeon[dungeon_hash])
         total_after_dedup += after_count
