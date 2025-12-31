@@ -973,9 +973,9 @@ export default {
             networkLog,
             dungeons: dungeonResults,
             summary: {
-              totalBungieCompletions: dungeonResults.reduce((sum, d) => sum + d.bungie.completedActivities, 0),
-              totalDbClears: dungeonResults.reduce((sum, d) => sum + d.database.totalClears, 0),
-              needsSyncCount: dungeonResults.filter(d => d.comparison.needsSync).length,
+              totalBungieCompletions,
+              totalDbClears,
+              needsSyncCount: dungeonsNeedingSync,
             },
           }, 200, request, env);
         } catch (err) {
