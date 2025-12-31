@@ -930,6 +930,17 @@ export default {
             });
           }
 
+          // Log aggregated stats per dungeon
+          console.log(`[Debug] ==================== AGGREGATED STATS PER DUNGEON ====================`);
+          for (const dungeon of dungeonResults) {
+            console.log(`[Debug] ${dungeon.dungeonName} (${dungeon.dungeonHash}):`);
+            console.log(`[Debug]   Bungie: ${dungeon.bungie.completedActivities} completions`);
+            console.log(`[Debug]   DB: ${dungeon.database.totalClears} total clears, ${dungeon.database.fullClears} full clears`);
+            console.log(`[Debug]   Needs Sync: ${dungeon.comparison.needsSync} (missing ${dungeon.comparison.missingInDb} in DB)`);
+          }
+          console.log(`[Debug] ====================================================================`);
+          console.log(`[Debug] TOTALS: ${dungeonResults.reduce((sum, d) => sum + d.bungie.completedActivities, 0)} Bungie completions, ${dungeonResults.reduce((sum, d) => sum + d.database.totalClears, 0)} DB clears, ${dungeonResults.filter(d => d.comparison.needsSync).length} dungeons need sync`);
+
           return jsonResponse({
             membershipId,
             membershipType: Number(membershipType),
