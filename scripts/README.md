@@ -189,6 +189,33 @@ This script can be integrated into a larger system by:
 3. Adding batch coordination and tracking similar to MemberCoordinator
 4. Implementing PGCR fetching for detailed activity statistics
 
+## Testing
+
+The script includes unit tests to validate the core pipeline logic:
+
+```bash
+python scripts/test_processor.py
+```
+
+This will test:
+- Activity reference map loading
+- Activity grouping by dungeon type
+- Deduplication logic
+- Filtering to completed activities
+- Batching logic
+- Constant values
+
+All tests run without requiring API access or credentials.
+
+## Code Quality
+
+The implementation follows these principles:
+- **Deterministic**: Same inputs always produce same outputs
+- **Reliable**: Comprehensive error handling and retry logic
+- **Observable**: Detailed logging at each pipeline stage
+- **Tested**: Unit tests for all core functions
+- **Documented**: Clear code comments and documentation
+
 ## License
 
 This script is part of the cheapraidbanners project.
