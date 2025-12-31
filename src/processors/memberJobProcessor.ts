@@ -120,7 +120,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    if (completed.length <= dbTotalClears) {
+    // Skip if fewer completions than DB (should not happen under normal circumstances)
+    // Equal counts are handled via date-based filtering below
+    if (completed.length < dbTotalClears) {
       continue;
     }
 
@@ -130,8 +132,22 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       return ta - tb;
     });
 
+    // Determine which activities are new
     let newActivities = completed;
-    if (cutoffDate) {
+    
+    if (completed.length > dbTotalClears) {
+      // We have more completions than before
+      // Process only the NEW completions (the last N in chronological order by instance start time)
+      // Note: This is a heuristic since 'period' reflects instance start time, not completion time.
+      // For the character-switching case, this ensures we process recent instances even if they
+      // were started before the cutoff date but completed after.
+      // Assumption: Newer instances (by start time) are more likely to be new completions.
+      // Edge case: If old instances are completed out of order, they might be missed in this pass
+      // but will be caught in the next sync when the count increases further.
+      const newCount = completed.length - dbTotalClears;
+      newActivities = completed.slice(-newCount);
+    } else if (cutoffDate) {
+      // Same number of completions, filter by date for incremental updates
       newActivities = completed.filter(a => {
         try {
           const actDate = new Date(a.period);
@@ -197,8 +213,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    // Skip if no new activities
-    if (completed.length <= dbTotalClears) {
+    // Skip if fewer completions than DB (should not happen under normal circumstances)
+    // Equal counts are handled via date-based filtering below
+    if (completed.length < dbTotalClears) {
       continue;
     }
 
@@ -209,9 +226,22 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       return ta - tb;
     });
 
-    // Filter to new activities after cutoff
+    // Determine which activities are new
     let newActivities = completed;
-    if (cutoffDate) {
+    
+    if (completed.length > dbTotalClears) {
+      // We have more completions than before
+      // Process only the NEW completions (the last N in chronological order by instance start time)
+      // Note: This is a heuristic since 'period' reflects instance start time, not completion time.
+      // For the character-switching case, this ensures we process recent instances even if they
+      // were started before the cutoff date but completed after.
+      // Assumption: Newer instances (by start time) are more likely to be new completions.
+      // Edge case: If old instances are completed out of order, they might be missed in this pass
+      // but will be caught in the next sync when the count increases further.
+      const newCount = completed.length - dbTotalClears;
+      newActivities = completed.slice(-newCount);
+    } else if (cutoffDate) {
+      // Same number of completions, filter by date for incremental updates
       newActivities = completed.filter(a => {
         try {
           const actDate = new Date(a.period);

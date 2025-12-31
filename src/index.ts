@@ -723,6 +723,206 @@ export default {
         return jsonResponse({ success: true, clanId }, 200, request, env);
       }
 
+      // GET /debug/user-completions - Debug endpoint to check completion counts for a single user
+      if (url.pathname === '/debug/user-completions' && request.method === 'GET') {
+        const membershipId = url.searchParams.get('membershipId');
+        const membershipType = url.searchParams.get('membershipType');
+        const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
+
+        if (!membershipId || !membershipType) {
+          return jsonResponse({ 
+            error: 'Missing required params: membershipId, membershipType' 
+          }, 400, request, env);
+        }
+
+        try {
+          const { ACTIVITY_REFERENCE_MAP } = await import('./constants/activityReferenceMap');
+          
+          console.log(`[Debug] Fetching completions for user ${membershipId}`);
+
+          // Fetch characters
+          const characters = await fetchCharactersForMember(
+            membershipId,
+            Number(membershipType),
+            env.BUNGIE_API_KEY
+          );
+
+          if (!characters || characters.length === 0) {
+            return jsonResponse({ 
+              error: 'No characters found',
+              membershipId,
+              membershipType 
+            }, 404, request, env);
+          }
+
+          console.log(`[Debug] Found ${characters.length} characters`);
+
+          // Fetch all activities for all characters
+          const activitiesByChar: Record<string, any[]> = {};
+          for (const char of characters) {
+            activitiesByChar[char.characterId] = [];
+          }
+
+          const modes = [82, 2]; // Dungeon, Story
+          for (const mode of modes) {
+            for (const char of characters) {
+              let page = 0;
+              const pageSize = 250;
+              
+              while (true) {
+                const activities = await fetchActivitiesForCharacter(
+                  Number(membershipType),
+                  membershipId,
+                  char.characterId,
+                  page,
+                  mode,
+                  pageSize,
+                  env.BUNGIE_API_KEY
+                ).catch((err) => {
+                  console.warn(`[Debug] Failed to fetch activities for char ${char.characterId} page ${page}:`, err);
+                  return [];
+                });
+
+                if (activities && activities.length > 0) {
+                  activitiesByChar[char.characterId].push(...activities);
+                }
+
+                if (!activities || activities.length < pageSize) break;
+                page++;
+              }
+            }
+          }
+
+          const totalActivitiesFetched = Object.values(activitiesByChar).reduce(
+            (sum, acts) => sum + acts.length, 0
+          );
+          
+          console.log(`[Debug] Fetched ${totalActivitiesFetched} total activities`);
+
+          // Group by dungeon hash and deduplicate
+          const activitiesByDungeon: Record<string, any[]> = {};
+          for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+            activitiesByDungeon[dungeon.hash] = [];
+          }
+
+          for (const charId of Object.keys(activitiesByChar)) {
+            for (const activity of activitiesByChar[charId]) {
+              const refId = String(activity?.activityDetails?.referenceId || '');
+              
+              for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+                if (dungeon.referenceIds.includes(refId)) {
+                  activitiesByDungeon[dungeon.hash].push({
+                    ...activity,
+                    characterId: charId,
+                  });
+                  break;
+                }
+              }
+            }
+          }
+
+          // Deduplicate per dungeon by instanceId (prefer completed)
+          for (const hash of Object.keys(activitiesByDungeon)) {
+            const map = new Map<string, any>();
+            
+            for (const act of activitiesByDungeon[hash]) {
+              const id = act.activityDetails?.instanceId || act.instanceId;
+              if (!id) continue;
+              
+              const existing = map.get(id);
+              if (!existing) {
+                map.set(id, act);
+              } else {
+                const existingCompleted = !!(existing?.values?.completed?.basic?.value === 1);
+                const newCompleted = !!(act?.values?.completed?.basic?.value === 1);
+                if (!existingCompleted && newCompleted) {
+                  map.set(id, act);
+                }
+              }
+            }
+            activitiesByDungeon[hash] = Array.from(map.values());
+          }
+
+          // Build results per dungeon
+          const dungeonResults = [];
+          
+          for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+            const dungeonHash = dungeon.hash;
+            const activities = activitiesByDungeon[dungeonHash] || [];
+            
+            // Filter to completed only
+            const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
+            
+            // Sort by period
+            completed.sort((a, b) => {
+              const ta = a.period ? new Date(a.period).getTime() : 0;
+              const tb = b.period ? new Date(b.period).getTime() : 0;
+              return ta - tb;
+            });
+
+            // Get DB stats for comparison
+            const dbRow = await env.DB.prepare(`
+              SELECT total_clears, total_full_clears, last_processed_date
+              FROM member_dungeon_stats
+              WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
+            `).bind(clanId, membershipId, dungeonHash).first();
+
+            const dbTotalClears = dbRow ? Number((dbRow as any).total_clears ?? 0) : 0;
+            const dbFullClears = dbRow ? Number((dbRow as any).total_full_clears ?? 0) : 0;
+            const dbLastProcessedDate = dbRow ? (dbRow as any).last_processed_date : null;
+
+            dungeonResults.push({
+              dungeonName: dungeon.displayName,
+              dungeonHash,
+              bungie: {
+                totalActivities: activities.length,
+                completedActivities: completed.length,
+                oldestCompletion: completed.length > 0 ? completed[0].period : null,
+                newestCompletion: completed.length > 0 ? completed[completed.length - 1].period : null,
+              },
+              database: {
+                totalClears: dbTotalClears,
+                fullClears: dbFullClears,
+                lastProcessedDate: dbLastProcessedDate,
+              },
+              comparison: {
+                missingInDb: completed.length - dbTotalClears,
+                needsSync: completed.length > dbTotalClears,
+              },
+              recentCompletions: completed.slice(-5).map(a => ({
+                instanceId: a.activityDetails?.instanceId || a.instanceId,
+                period: a.period,
+                characterId: (a as any).characterId,
+              })),
+            });
+          }
+
+          return jsonResponse({
+            membershipId,
+            membershipType: Number(membershipType),
+            clanId,
+            characters: characters.map((c: any) => ({
+              characterId: c.characterId,
+              class: c.classType === 0 ? 'Titan' : c.classType === 1 ? 'Hunter' : c.classType === 2 ? 'Warlock' : 'Unknown',
+              light: c.light,
+            })),
+            totalActivitiesFetched,
+            dungeons: dungeonResults,
+            summary: {
+              totalBungieCompletions: dungeonResults.reduce((sum, d) => sum + d.bungie.completedActivities, 0),
+              totalDbClears: dungeonResults.reduce((sum, d) => sum + d.database.totalClears, 0),
+              needsSyncCount: dungeonResults.filter(d => d.comparison.needsSync).length,
+            },
+          }, 200, request, env);
+        } catch (err) {
+          console.error(`[HTTP:${requestId}] ❌ Error in debug endpoint:`, err);
+          return jsonResponse({ 
+            error: 'Failed to fetch user completions',
+            message: (err as any)?.message ?? String(err)
+          }, 500, request, env);
+        }
+      }
+
       // 404 - Not Found
       return jsonResponse({ error: 'Not found' }, 404, request, env);
       
