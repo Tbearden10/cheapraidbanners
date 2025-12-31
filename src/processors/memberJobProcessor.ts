@@ -226,100 +226,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     console.warn(`[MemberJob] Missing ${totalMissing} completions (${((totalMissing/totalTarget)*100).toFixed(1)}% of aggregate)`);
   }
 
-  // Calculate total batches across all dungeons
-  let totalBatches = 0;
-  const dungeonBatchCounts: Record<string, number> = {};
-  
-  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-    const dungeonHash = dungeon.hash;
-    const activities = activitiesByDungeon[dungeonHash] || [];
-    if (activities.length === 0) continue;
-
-    const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
-    if (completed.length === 0) continue;
-
-    // Check DB for previous stats
-    const prevRow = await env.DB.prepare(`
-      SELECT last_processed_date, total_clears
-      FROM member_dungeon_stats
-      WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
-    `).bind(job.clanId, job.membershipId, dungeonHash).first();
-
-    let cutoffDate: Date | null = null;
-    if (prevRow && (prevRow as any).last_processed_date) {
-      cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
-    }
-
-    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-    // Skip if fewer completions than DB (should not happen under normal circumstances)
-    // Equal counts are handled via date-based filtering below
-    if (completed.length < dbTotalClears) {
-      continue;
-    }
-
-    completed.sort((a, b) => {
-      const ta = a.period ? new Date(a.period).getTime() : 0;
-      const tb = b.period ? new Date(b.period).getTime() : 0;
-      return ta - tb;
-    });
-
-    // Determine which activities are new
-    let newActivities = completed;
-    
-    if (completed.length > dbTotalClears) {
-      // We have more completions than before
-      // Process only the NEW completions (the last N in chronological order by instance start time)
-      // Note: This is a heuristic since 'period' reflects instance start time, not completion time.
-      // For the character-switching case, this ensures we process recent instances even if they
-      // were started before the cutoff date but completed after.
-      // Assumption: Newer instances (by start time) are more likely to be new completions.
-      // Edge case: If old instances are completed out of order, they might be missed in this pass
-      // but will be caught in the next sync when the count increases further.
-      const newCount = completed.length - dbTotalClears;
-      newActivities = completed.slice(-newCount);
-    } else if (cutoffDate) {
-      // Same number of completions, filter by date for incremental updates
-      newActivities = completed.filter(a => {
-        try {
-          const actDate = new Date(a.period);
-          return actDate.getTime() > cutoffDate!.getTime();
-        } catch {
-          return true;
-        }
-      });
-    }
-
-    if (newActivities.length === 0) continue;
-
-    const batchCount = Math.ceil(newActivities.length / MAX_BATCH_SIZE);
-    totalBatches += batchCount;
-    dungeonBatchCounts[dungeonHash] = batchCount;
-  }
-
-  // Initialize MemberCoordinator if we have batches to process
-  if (totalBatches > 0) {
-    const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.membershipId);
-    const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
-    
-    await coordinator.fetch('https://internal/init', {
-      method: 'POST',
-      body: JSON.stringify({
-        membershipId: job.membershipId,
-        membershipType: job.membershipType,
-        clanId: job.clanId,
-        totalBatches,
-        dungeonBatches: dungeonBatchCounts
-      }),
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
   // Queue per-dungeon jobs
   let totalQueued = 0;
-  let batchesQueued = 0;
+  const dungeonBatchCounts: Record<string, number> = {};
 
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
     const dungeonHash = dungeon.hash;
@@ -347,35 +256,26 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    // Skip if fewer completions than DB (should not happen under normal circumstances)
-    // Equal counts are handled via date-based filtering below
+    // Skip if fewer completions than DB (data inconsistency)
     if (completed.length < dbTotalClears) {
+      console.warn(`[MemberJob] ${dungeon.displayName}: Fewer completions than DB (${completed.length} < ${dbTotalClears})`);
       continue;
     }
 
-    // Sort by period ascending (oldest first)
+    // Sort by period ascending (oldest first) BEFORE filtering
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
       const tb = b.period ? new Date(b.period).getTime() : 0;
       return ta - tb;
     });
 
-    // Determine which activities are new
+    // Determine which activities are new using date-based filtering
+    // This ensures we only process activities that haven't been seen before
     let newActivities = completed;
     
-    if (completed.length > dbTotalClears) {
-      // We have more completions than before
-      // Process only the NEW completions (the last N in chronological order by instance start time)
-      // Note: This is a heuristic since 'period' reflects instance start time, not completion time.
-      // For the character-switching case, this ensures we process recent instances even if they
-      // were started before the cutoff date but completed after.
-      // Assumption: Newer instances (by start time) are more likely to be new completions.
-      // Edge case: If old instances are completed out of order, they might be missed in this pass
-      // but will be caught in the next sync when the count increases further.
-      const newCount = completed.length - dbTotalClears;
-      newActivities = completed.slice(-newCount);
-    } else if (cutoffDate) {
-      // Same number of completions, filter by date for incremental updates
+    if (cutoffDate) {
+      // We have a cutoff date - filter to activities AFTER that date
+      // This is the correct approach: after deduplication, filter by date
       newActivities = completed.filter(a => {
         try {
           const actDate = new Date(a.period);
@@ -384,7 +284,17 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
           return true;
         }
       });
+    } else if (dbTotalClears > 0) {
+      // No cutoff date but we have a DB count - this shouldn't happen normally
+      // Use count-based as fallback (process activities beyond what's in DB)
+      if (completed.length > dbTotalClears) {
+        const newCount = completed.length - dbTotalClears;
+        newActivities = completed.slice(-newCount);
+      } else {
+        newActivities = [];
+      }
     }
+    // If no cutoff date and no DB count, this is an initial sync - process all
 
     if (newActivities.length === 0) {
       continue;
@@ -403,6 +313,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       batches.push(activitiesPayload.slice(i, i + MAX_BATCH_SIZE));
     }
 
+    dungeonBatchCounts[dungeonHash] = batches.length;
+
     // Queue each batch
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       await env.STATS_QUEUE.send({
@@ -415,10 +327,28 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       });
       
       totalQueued += batches[batchIndex].length;
-      totalBatches++;
     }
 
     console.log(`[MemberJob] Queued ${batches.length} batch(es) for ${dungeon.displayName} (${activitiesPayload.length} new activities)`);
+  }
+
+  // Initialize MemberCoordinator if we have batches to process
+  const totalBatches = Object.values(dungeonBatchCounts).reduce((sum, count) => sum + count, 0);
+  if (totalBatches > 0) {
+    const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.membershipId);
+    const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
+    
+    await coordinator.fetch('https://internal/init', {
+      method: 'POST',
+      body: JSON.stringify({
+        membershipId: job.membershipId,
+        membershipType: job.membershipType,
+        clanId: job.clanId,
+        totalBatches,
+        dungeonBatches: dungeonBatchCounts
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   await notifyRunComplete(env, job);
