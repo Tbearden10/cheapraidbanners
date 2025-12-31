@@ -1,6 +1,7 @@
 // ============================================================================
 // FILE: src/processors/memberJobProcessor.ts
 // Clean member job processor with MemberCoordinator for batch aggregation
+// UPDATED: Added aggregate comparison, parallel fetching, pagination fix
 // ============================================================================
 
 import type { Env, MemberJob } from '../types';
@@ -8,6 +9,7 @@ import { ACTIVITY_REFERENCE_MAP } from '../constants/activityReferenceMap';
 import {
   fetchCharactersForMember,
   fetchActivitiesForCharacter,
+  fetchAggregateStatsForCharacter,
   withRateLimit,
 } from '../api/bungieApi';
 
@@ -37,6 +39,52 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   characters.forEach((char: any, idx: number) => {
     console.log(`  Character ${idx + 1}: ${char.characterId}${char.deleted ? ' (deleted)' : ''}`);
   });
+
+  // NEW: Fetch aggregate targets for comparison
+  console.log(`[MemberJob] Fetching aggregate targets for ${job.displayName}...`);
+
+  const aggregateTargets: Record<string, number> = {};
+
+  // Build reference map for looking up dungeon hashes from activity hashes
+  const referenceMap: Record<string, { hash: string; displayName: string }> = {};
+  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+    for (const refId of dungeon.referenceIds) {
+      referenceMap[refId] = {
+        hash: dungeon.hash,
+        displayName: dungeon.displayName
+      };
+    }
+  }
+
+  // Fetch aggregates for each character
+  for (const character of characters) {
+    const aggregates = await fetchAggregateStatsForCharacter(
+      job.membershipType,
+      job.membershipId,
+      character.characterId,
+      env.BUNGIE_API_KEY
+    );
+    
+    for (const activity of aggregates) {
+      const activityHash = String(activity.activityHash || '');
+      const completions = Number(activity.values?.activityCompletions?.basic?.value || 0);
+      
+      // Map activity hash to dungeon hash
+      if (activityHash in referenceMap) {
+        const dungeonHash = referenceMap[activityHash].hash;
+        aggregateTargets[dungeonHash] = (aggregateTargets[dungeonHash] || 0) + completions;
+      }
+    }
+  }
+
+  const totalAggregateTarget = Object.values(aggregateTargets).reduce((sum, v) => sum + v, 0);
+  console.log(`[MemberJob] Aggregate targets: ${totalAggregateTarget} total completions`);
+  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+    const target = aggregateTargets[dungeon.hash] || 0;
+    if (target > 0) {
+      console.log(`  ${dungeon.displayName}: ${target} completions`);
+    }
+  }
 
   // Fetch all activities
   const activitiesByChar = await fetchAllActivities(
@@ -187,6 +235,79 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     console.warn(`[MemberJob]   Missing refId: ${missingRefIdActivities.length}`);
     console.warn(`[MemberJob]   Total accounted: ${totalGrouped}`);
     console.warn(`[MemberJob]   Difference: ${totalActivitiesFetched - totalGrouped}`);
+  }
+
+  // NEW: Compare against aggregate targets
+  console.log(`\n[MemberJob] Comparing against aggregate targets...`);
+
+  const comparisonResults: Array<{
+    dungeonHash: string;
+    dungeonName: string;
+    target: number;
+    found: number;
+    difference: number;
+  }> = [];
+
+  let perfectMatches = 0;
+  let totalTarget = 0;
+  let totalFound = 0;
+
+  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+    const dungeonHash = dungeon.hash;
+    const target = aggregateTargets[dungeonHash] || 0;
+    const activities = activitiesByDungeon[dungeonHash] || [];
+    const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
+    const found = completed.length;
+    
+    if (target > 0 || found > 0) {
+      const difference = target - found;
+      
+      totalTarget += target;
+      totalFound += found;
+      
+      comparisonResults.push({
+        dungeonHash,
+        dungeonName: dungeon.displayName,
+        target,
+        found,
+        difference
+      });
+      
+      if (difference === 0) {
+        perfectMatches++;
+      } else {
+        console.warn(
+          `[MemberJob] ⚠️  ${dungeon.displayName}: ` +
+          `Target=${target}, Found=${found}, Diff=${difference > 0 ? '+' : ''}${difference}`
+        );
+      }
+    }
+  }
+
+  const totalMissing = totalTarget - totalFound;
+
+  console.log(
+    `[MemberJob] Aggregate comparison summary: ` +
+    `Target=${totalTarget}, Found=${totalFound}, Missing=${totalMissing}, ` +
+    `Matches=${perfectMatches}/${comparisonResults.length}`
+  );
+
+  if (totalMissing > 0) {
+    console.warn(
+      `[MemberJob] ❌ Missing ${totalMissing} completions in history ` +
+      `(${((totalMissing/totalTarget)*100).toFixed(1)}% of aggregate)`
+    );
+    console.warn(`[MemberJob] These completions exist in aggregate but NOT in activity history`);
+    console.warn(`[MemberJob] Possible causes:`);
+    console.warn(`[MemberJob]   • Activities without instance IDs (not in history)`);
+    console.warn(`[MemberJob]   • Private/hidden activities`);
+    console.warn(`[MemberJob]   • Activities from before history tracking`);
+    console.warn(`[MemberJob]   • API data inconsistency`);
+  } else if (totalMissing < 0) {
+    console.warn(
+      `[MemberJob] ⚠️  Found ${Math.abs(totalMissing)} MORE completions than aggregate ` +
+      `(unexpected - investigate)`
+    );
   }
 
   // Calculate total batches across all dungeons
@@ -434,64 +555,84 @@ async function fetchAllActivities(
     console.log(`  Character ${idx + 1}: ${charId}`);
   });
 
-  async function fetchAllPagesForCharacter(charId: string, mode: number) {
-    const pageSize = 250;
-    let page = 0;
-    let charTotalActivities = 0;
-
-    while (true) {
-      const activities: any[] = await withRateLimit(
-        async () => {
-          try {
-            return await fetchActivitiesForCharacter(
-              membershipType,
-              membershipId,
-              charId,
-              page,
-              mode,
-              pageSize,
-              apiKey
-            );
-          } catch (err: any) {
-            // Check if it's a rate limit error
-            if (err.message && (err.message.includes('429') || err.message.includes('rate limit'))) {
-              totalRateLimitRetries++;
-              console.warn(`[MemberJob:Fetch] RATE LIMITED - CharID: ${charId}, Mode: ${mode}, Page: ${page} (Retry #${totalRateLimitRetries})`);
-            }
-            throw err;
+  // Helper to fetch a single page for a character
+  async function fetchPage(charId: string, mode: number, page: number): Promise<any[]> {
+    return await withRateLimit(
+      async () => {
+        try {
+          return await fetchActivitiesForCharacter(
+            membershipType,
+            membershipId,
+            charId,
+            page,
+            mode,
+            250,
+            apiKey
+          );
+        } catch (err: any) {
+          if (err.message && (err.message.includes('429') || err.message.includes('rate limit'))) {
+            totalRateLimitRetries++;
+            console.warn(`[MemberJob:Fetch] RATE LIMITED - Retry #${totalRateLimitRetries}`);
           }
-        },
-        3
-      ).catch((err) => {
-        console.warn(`[MemberJob:Fetch] FAILED - CharID: ${charId}, Mode: ${mode}, Page: ${page}: ${err}`);
-        return [];
-      });
-
-      if (activities && activities.length > 0) {
-        out[charId].push(...activities);
-        charTotalActivities += activities.length;
-      }
-
-      if (!activities || activities.length < pageSize) {
-        if (charTotalActivities > 0) {
-          console.log(`[MemberJob:Fetch] CharID ${charId} Mode ${mode}: ${charTotalActivities} activities`);
+          throw err;
         }
-        break;
-      }
-
-      page++;
-      await sleep(200);
-    }
+      },
+      3
+    ).catch((err) => {
+      console.warn(`[MemberJob:Fetch] FAILED - CharID: ${charId}, Mode: ${mode}, Page: ${page}: ${err}`);
+      return [];
+    });
   }
 
   for (const mode of modes) {
     const modeName = mode === 82 ? 'Dungeon' : mode === 2 ? 'Story' : `Mode-${mode}`;
-    console.log(`[MemberJob:Fetch] Fetching mode ${mode} (${modeName}) for all characters...`);
+    console.log(`[MemberJob:Fetch] Fetching mode ${mode} (${modeName})...`);
     
-    await Promise.all(
-      characterIds.map((charId) => fetchAllPagesForCharacter(charId, mode))
-    );
-    await sleep(250);
+    // Track which characters still need more pages
+    const activeCharacters = new Set(characterIds);
+    let currentPage = 0;
+    
+    while (activeCharacters.size > 0 && currentPage <= 100) {
+      // Fetch current page for ALL active characters in parallel
+      const pagePromises = Array.from(activeCharacters).map(charId => 
+        fetchPage(charId, mode, currentPage).then(activities => ({ charId, activities }))
+      );
+      
+      const results = await Promise.allSettled(pagePromises);
+      
+      // Process results
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          const { charId, activities } = result.value;
+          
+          if (activities && activities.length > 0) {
+            out[charId].push(...activities);
+            
+            // CRITICAL FIX: Stop only on empty response, NOT when length < 250
+            if (activities.length === 0) {
+              activeCharacters.delete(charId);
+            }
+          } else {
+            // Empty response - character is done
+            activeCharacters.delete(charId);
+          }
+        } else {
+          // On error, we could track and retry, but for now mark as done to avoid infinite loops
+          console.error(`[MemberJob:Fetch] Error in parallel fetch:`, result.reason);
+        }
+      }
+      
+      console.log(
+        `[MemberJob:Fetch] Mode ${mode} Page ${currentPage}: ` +
+        `${activeCharacters.size}/${characterIds.length} characters still active`
+      );
+      
+      currentPage++;
+      
+      if (activeCharacters.size > 0) {
+        await sleep(200); // Rate limit delay between page waves
+      }
+    }
   }
 
   const totalActivities = Object.values(out).reduce((sum, acts) => sum + acts.length, 0);

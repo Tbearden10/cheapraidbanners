@@ -232,3 +232,29 @@ export async function withRateLimit<T>(
   
   throw new Error('withRateLimit: should not reach here');
 }
+
+export async function fetchAggregateStatsForCharacter(
+  membershipType: number,
+  membershipId: string,
+  characterId: string,
+  apiKey: string
+): Promise<any[]> {
+  const url = `https://www.bungie.net/Platform/Destiny2/${membershipType}/Account/${membershipId}/Character/${characterId}/Stats/AggregateActivityStats/`;
+  
+  try {
+    const response = await fetchWithRetry(url, {
+      headers: { 'X-API-Key': apiKey, Accept: 'application/json' }
+    });
+    
+    const data = await response.json();
+    
+    if (data.ErrorCode !== 1 || !data.Response) {
+      return [];
+    }
+    
+    return data.Response.activities || [];
+  } catch (error) {
+    console.error(`Failed to fetch aggregate stats for character ${characterId}:`, error);
+    return [];
+  }
+}
