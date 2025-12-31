@@ -125,6 +125,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   let totalBeforeDedup = 0;
   let totalAfterDedup = 0;
   let totalDuplicatesRemoved = 0;
+  let totalMissingInstanceId = 0;
   
   for (const hash of Object.keys(activitiesByDungeon)) {
     const beforeCount = activitiesByDungeon[hash].length;
@@ -161,8 +162,9 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     
     const afterCount = activitiesByDungeon[hash].length;
     totalAfterDedup += afterCount;
-    const removed = beforeCount - afterCount;
+    const removed = beforeCount - afterCount - instanceIdsWithoutId.length;
     totalDuplicatesRemoved += removed;
+    totalMissingInstanceId += instanceIdsWithoutId.length;
     
     if (beforeCount > 0) {
       const dungeon = ACTIVITY_REFERENCE_MAP.find(d => d.hash === hash);
@@ -175,16 +177,17 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     }
   }
   
-  console.log(`[MemberJob] Deduplication summary: ${totalBeforeDedup} → ${totalAfterDedup} (removed ${totalDuplicatesRemoved} duplicates)`);
+  console.log(`[MemberJob] Deduplication summary: ${totalBeforeDedup} → ${totalAfterDedup} (removed ${totalDuplicatesRemoved} duplicates, ${totalMissingInstanceId} missing instanceId)`);
   
   // Sanity check: compare to fetched total
-  const totalGrouped = totalAfterDedup + ungroupedActivities.length + missingRefIdActivities.length;
+  const totalGrouped = totalAfterDedup + ungroupedActivities.length + missingRefIdActivities.length + totalMissingInstanceId;
   if (totalGrouped !== totalActivitiesFetched) {
     console.warn(`[MemberJob] ⚠️  Activity accounting mismatch!`);
     console.warn(`[MemberJob]   Fetched: ${totalActivitiesFetched}`);
     console.warn(`[MemberJob]   After dedup: ${totalAfterDedup}`);
     console.warn(`[MemberJob]   Ungrouped: ${ungroupedActivities.length}`);
     console.warn(`[MemberJob]   Missing refId: ${missingRefIdActivities.length}`);
+    console.warn(`[MemberJob]   Missing instanceId (excluded): ${totalMissingInstanceId}`);
     console.warn(`[MemberJob]   Total accounted: ${totalGrouped}`);
     console.warn(`[MemberJob]   Difference: ${totalActivitiesFetched - totalGrouped}`);
   }
