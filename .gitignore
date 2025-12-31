@@ -4,3 +4,13 @@ dist/
 .wrangler
 .dev.vars
 worker-configuration.d.ts
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
