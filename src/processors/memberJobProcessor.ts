@@ -38,7 +38,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     job.membershipType,
     job.membershipId,
     characters.map((c: any) => c.characterId),
-    env.BUNGIE_API_KEY
+    env.BUNGIE_API_KEY,
+    job.displayName
   );
 
   const totalActivitiesFetched = Object.values(activitiesByChar).reduce(
@@ -324,7 +325,8 @@ async function fetchAllActivities(
   membershipType: number,
   membershipId: string,
   characterIds: string[],
-  apiKey: string
+  apiKey: string,
+  displayName?: string
 ): Promise<Record<string, any[]>> {
   const out: Record<string, any[]> = {};
   for (const id of characterIds) out[id] = [];
@@ -334,6 +336,7 @@ async function fetchAllActivities(
   async function fetchAllPagesForCharacter(charId: string, mode: number) {
     const pageSize = 250;
     let page = 0;
+    let totalFetched = 0;
 
     while (true) {
       const activities: any[] = await withRateLimit(
@@ -348,16 +351,31 @@ async function fetchAllActivities(
             apiKey
           ),
         3
-      ).catch(() => []);
+      ).catch((err) => {
+        console.warn(`[MemberJob] Failed to fetch activities for ${displayName || membershipId}, char ${charId}, mode ${mode}, page ${page}:`, err);
+        return [];
+      });
 
       if (activities && activities.length > 0) {
         out[charId].push(...activities);
+        totalFetched += activities.length;
       }
 
-      if (!activities || activities.length < pageSize) break;
+      if (!activities || activities.length < pageSize) {
+        if (totalFetched > 0) {
+          console.log(`[MemberJob] Fetched ${totalFetched} activities for ${displayName || membershipId}, char ${charId}, mode ${mode} (${page + 1} pages)`);
+        }
+        break;
+      }
 
       page++;
       await sleep(200);
+      
+      // Safety check to prevent infinite loops
+      if (page > 100) {
+        console.warn(`[MemberJob] WARNING: Reached page limit (100) for ${displayName || membershipId}, char ${charId}, mode ${mode}`);
+        break;
+      }
     }
   }
 

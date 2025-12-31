@@ -8,12 +8,17 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 async function fetchWithRetry(
   url: string,
   options: RequestInit = {},
-  retries = 2
+  retries = 2,
+  debug = false
 ): Promise<Response> {
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
+      if (debug && attempt > 0) {
+        console.log(`[BungieAPI] Retry attempt ${attempt}/${retries} for ${url}`);
+      }
+      
       const response = await fetch(url, options);
 
       if (response.ok) {
@@ -25,6 +30,10 @@ async function fetchWithRetry(
         const retryAfter = response.headers.get('Retry-After');
         const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : 2000;
         
+        if (debug) {
+          console.warn(`[BungieAPI] Rate limited (429), waiting ${waitMs}ms before retry`);
+        }
+        
         if (attempt < retries) {
           await sleep(waitMs);
           continue;
@@ -33,6 +42,11 @@ async function fetchWithRetry(
 
       if (response.status >= 500 && response.status < 600) {
         lastError = new Error(`HTTP ${response.status}`);
+        
+        if (debug) {
+          console.warn(`[BungieAPI] Server error ${response.status}, retrying...`);
+        }
+        
         if (attempt < retries) {
           await sleep(1000 * (attempt + 1));
           continue;
@@ -40,10 +54,17 @@ async function fetchWithRetry(
       }
 
       // Non-retriable error - return response
+      if (debug) {
+        console.warn(`[BungieAPI] Non-retriable error: ${response.status} ${response.statusText}`);
+      }
       return response;
       
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
+      
+      if (debug) {
+        console.error(`[BungieAPI] Fetch exception:`, error);
+      }
       
       if (attempt < retries) {
         await sleep(500 * (attempt + 1));
@@ -52,6 +73,10 @@ async function fetchWithRetry(
     }
   }
 
+  if (debug) {
+    console.error(`[BungieAPI] All retry attempts exhausted for ${url}`);
+  }
+  
   throw lastError || new Error('Fetch failed after retries');
 }
 
@@ -121,7 +146,7 @@ export async function fetchCharactersForMember(
   
   const response = await fetchWithRetry(url, {
     headers: { 'X-API-Key': apiKey, Accept: 'application/json' }
-  });
+  }, 2, debug);
   
   if (debug) {
     console.log(`[BungieAPI] Response status: ${response.status} ${response.statusText}`);
@@ -184,7 +209,7 @@ export async function fetchActivitiesForCharacter(
     
     const response = await fetchWithRetry(url, {
       headers: { 'X-API-Key': apiKey, Accept: 'application/json' }
-    });
+    }, 2, debug);
     
     if (debug) {
       console.log(`[BungieAPI] Response status: ${response.status} ${response.statusText}`);
