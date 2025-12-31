@@ -190,6 +190,17 @@ export async function fetchCharactersForMember(
   }));
 }
 
+/**
+ * Fetch activities for a character from the Bungie API
+ * 
+ * @param debug - Enable verbose logging for debugging
+ * @returns Array of activities, or empty array on error
+ * 
+ * Note: Unlike fetchCharactersForMember, this function returns an empty array
+ * instead of throwing on non-success error codes. This is because some error codes
+ * (e.g., 1601 for private profiles, 1623 for no activities) are expected and should
+ * be handled gracefully rather than treated as fatal errors.
+ */
 export async function fetchActivitiesForCharacter(
   membershipType: number,
   membershipId: string,
