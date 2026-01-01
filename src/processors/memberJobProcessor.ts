@@ -240,18 +240,18 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
     if (completed.length === 0) continue;
 
-    // Check DB for previous stats
+    // Check DB for previous stats for THIS dungeon only
     const prevRow = await env.DB.prepare(`
       SELECT last_processed_date, total_clears
       FROM member_dungeon_stats
       WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
     `).bind(job.clanId, job.membershipId, dungeonHash).first();
 
+    // Use ONLY the per-dungeon last_processed_date, no fallback to job.lastProcessedDate
+    // This ensures we process all new clears since the last time THIS dungeon was processed
     let cutoffDate: Date | null = null;
     if (prevRow && (prevRow as any).last_processed_date) {
       cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
     }
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
@@ -269,32 +269,22 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       return ta - tb;
     });
 
-    // Determine which activities are new using date-based filtering
-    // This ensures we only process activities that haven't been seen before
+    // Filter to only new activities based on last_processed_date for THIS dungeon
+    // Simple and clear: if we have a cutoff date, filter to activities after it
+    // If no cutoff date exists, this is the first sync for this dungeon - process all
     let newActivities = completed;
     
     if (cutoffDate) {
-      // We have a cutoff date - filter to activities AFTER that date
-      // This is the correct approach: after deduplication, filter by date
       newActivities = completed.filter(a => {
         try {
           const actDate = new Date(a.period);
           return actDate.getTime() > cutoffDate!.getTime();
         } catch {
+          // If we can't parse the date, include it to be safe
           return true;
         }
       });
-    } else if (dbTotalClears > 0) {
-      // No cutoff date but we have a DB count - this shouldn't happen normally
-      // Use count-based as fallback (process activities beyond what's in DB)
-      if (completed.length > dbTotalClears) {
-        const newCount = completed.length - dbTotalClears;
-        newActivities = completed.slice(-newCount);
-      } else {
-        newActivities = [];
-      }
     }
-    // If no cutoff date and no DB count, this is an initial sync - process all
 
     if (newActivities.length === 0) {
       continue;
