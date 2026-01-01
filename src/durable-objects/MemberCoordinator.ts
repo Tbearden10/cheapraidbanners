@@ -99,11 +99,6 @@ export class MemberCoordinator implements DurableObject {
     const fourHours = 4 * 60 * 60 * 1000;
     await this.state.storage.setAlarm(Date.now() + fourHours);
 
-    console.log(
-      `[MemberCoordinator] Initialized for member ${body.membershipId}, ` +
-      `expecting ${body.totalBatches} batches across ${Object.keys(body.dungeonBatches).length} dungeons`
-    );
-
     return new Response(
       JSON.stringify({ success: true, message: 'Coordinator initialized' }),
       { status: 200, headers: { 'Content-Type': 'application/json' } }
@@ -140,19 +135,13 @@ export class MemberCoordinator implements DurableObject {
     const totalReceived = this.batches.size;
     const allComplete = totalReceived === this.metadata.totalBatches;
 
-    console.log(
-      `[MemberCoordinator] Batch ${batchResult.batchId} received ` +
-      `(${totalReceived}/${this.metadata.totalBatches} total, ` +
-      `${this.dungeonBatchesReceived[dungeonHash]}/${this.metadata.dungeonBatches[dungeonHash]} for ${dungeonHash})`
-    );
-
     if (allComplete) {
       const aggregated = this.aggregateBatches();
       await this.cleanup();
 
       console.log(
-        `[MemberCoordinator] All batches complete for member ${this.metadata.membershipId}: ` +
-        `${Object.keys(aggregated.byDungeon).length} dungeons processed`
+        `[MemberCoordinator] All batches complete for ${this.metadata.membershipId} ` +
+        `(${Object.keys(aggregated.byDungeon).length} dungeons)`
       );
 
       return new Response(
@@ -255,11 +244,9 @@ export class MemberCoordinator implements DurableObject {
     this.batches.clear();
     this.metadata = null;
     this.dungeonBatchesReceived = {};
-    console.log('[MemberCoordinator] Cleaned up storage');
   }
 
   async alarm(): Promise<void> {
-    console.log('[MemberCoordinator] Alarm triggered - cleaning up stale coordinator');
     await this.cleanup();
   }
 }

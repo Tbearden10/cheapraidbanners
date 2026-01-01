@@ -20,7 +20,7 @@ const MAX_BATCH_SIZE = 30;
 
 export async function processMemberJob(env: Env, job: MemberJob): Promise<void> {
   const startTime = Date.now();
-  console.log(`[MemberJob] START: ${job.displayName}`);
+  console.log(`[MemberJob] Processing ${job.displayName}`);
 
   // Fetch characters
   const characters = await fetchCharactersForMember(
@@ -35,14 +35,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     return;
   }
 
-  console.log(`[MemberJob] Found ${characters.length} character(s) for ${job.displayName}`);
-  characters.forEach((char: any, idx: number) => {
-    console.log(`  Character ${idx + 1}: ${char.characterId}${char.deleted ? ' (deleted)' : ''}`);
-  });
-
-  // NEW: Fetch aggregate targets for comparison
-  console.log(`[MemberJob] Fetching aggregate targets for ${job.displayName}...`);
-
+  // Fetch aggregate targets for comparison
   const aggregateTargets: Record<string, number> = {};
 
   // Build reference map for looking up dungeon hashes from activity hashes
@@ -78,13 +71,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   }
 
   const totalAggregateTarget = Object.values(aggregateTargets).reduce((sum, v) => sum + v, 0);
-  console.log(`[MemberJob] Aggregate targets: ${totalAggregateTarget} total completions`);
-  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-    const target = aggregateTargets[dungeon.hash] || 0;
-    if (target > 0) {
-      console.log(`  ${dungeon.displayName}: ${target} completions`);
-    }
-  }
 
   // Fetch all activities
   const activitiesByChar = await fetchAllActivities(
@@ -97,8 +83,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
   const totalActivitiesFetched = Object.values(activitiesByChar).reduce(
     (sum, acts) => sum + acts.length, 0
   );
-  
-  console.log(`[MemberJob] Fetched ${totalActivitiesFetched} activities for ${job.displayName}`);
 
   // Group by dungeon hash and track ungrouped + missing refIds
   const activitiesByDungeon: Record<string, any[]> = {};
@@ -148,31 +132,26 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     }
   }
 
-  console.log(`[MemberJob] Processed ${totalProcessed} activities (should match ${totalActivitiesFetched})`);
+  // Log only warnings for mismatches
   if (totalProcessed !== totalActivitiesFetched) {
-    console.warn(`[MemberJob] ⚠️  MISMATCH: Processed ${totalProcessed} but fetched ${totalActivitiesFetched} (diff: ${totalActivitiesFetched - totalProcessed})`);
+    console.warn(`[MemberJob] Activity count mismatch: processed ${totalProcessed}, fetched ${totalActivitiesFetched}`);
   }
 
-  // Log missing refId activities
   if (missingRefIdActivities.length > 0) {
-    console.log(`[MemberJob] ⚠️  ${missingRefIdActivities.length} activities missing referenceId (skipped)`);
+    console.warn(`[MemberJob] ${missingRefIdActivities.length} activities missing referenceId (skipped)`);
   }
 
-  // Log ungrouped activities summary if any exist
   if (ungroupedActivities.length > 0) {
-    console.log(`[MemberJob] ⚠️  ${ungroupedActivities.length} ungrouped activities (not matching any dungeon)`);
     const ungroupedByRefId: Record<string, number> = {};
     for (const act of ungroupedActivities) {
       ungroupedByRefId[act.referenceId] = (ungroupedByRefId[act.referenceId] || 0) + 1;
     }
-    console.log(`[MemberJob] Ungrouped by RefID:`, ungroupedByRefId);
+    console.warn(`[MemberJob] ${ungroupedActivities.length} ungrouped activities:`, ungroupedByRefId);
   }
 
   // Dedupe per dungeon
-  console.log(`\n[MemberJob] Starting deduplication...`);
   let totalBeforeDedup = 0;
   let totalAfterDedup = 0;
-  let totalDuplicatesRemoved = 0;
   
   for (const hash of Object.keys(activitiesByDungeon)) {
     const beforeCount = activitiesByDungeon[hash].length;
@@ -206,48 +185,15 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     }
     
     activitiesByDungeon[hash] = Array.from(map.values());
+    totalAfterDedup += activitiesByDungeon[hash].length;
     
-    const afterCount = activitiesByDungeon[hash].length;
-    totalAfterDedup += afterCount;
-    const removed = beforeCount - afterCount;
-    totalDuplicatesRemoved += removed;
-    
-    if (beforeCount > 0) {
+    if (instanceIdsWithoutId.length > 0) {
       const dungeon = ACTIVITY_REFERENCE_MAP.find(d => d.hash === hash);
-      const dungeonName = dungeon?.displayName || hash;
-      console.log(`[MemberJob] ${dungeonName}: ${afterCount} unique activities (${removed} duplicates removed${instanceIdsWithoutId.length > 0 ? `, ${instanceIdsWithoutId.length} missing instanceId` : ''})`);
-      
-      if (instanceIdsWithoutId.length > 0) {
-        console.warn(`[MemberJob] ⚠️  ${dungeonName} has ${instanceIdsWithoutId.length} activities without instanceId - these were EXCLUDED from deduplication`);
-      }
+      console.warn(`[MemberJob] ${dungeon?.displayName || hash}: ${instanceIdsWithoutId.length} activities without instanceId (excluded)`);
     }
   }
-  
-  console.log(`[MemberJob] Deduplication summary: ${totalBeforeDedup} → ${totalAfterDedup} (removed ${totalDuplicatesRemoved} duplicates)`);
-  
-  // Sanity check: compare to fetched total
-  const totalGrouped = totalAfterDedup + ungroupedActivities.length + missingRefIdActivities.length;
-  if (totalGrouped !== totalActivitiesFetched) {
-    console.warn(`[MemberJob] ⚠️  Activity accounting mismatch!`);
-    console.warn(`[MemberJob]   Fetched: ${totalActivitiesFetched}`);
-    console.warn(`[MemberJob]   After dedup: ${totalAfterDedup}`);
-    console.warn(`[MemberJob]   Ungrouped: ${ungroupedActivities.length}`);
-    console.warn(`[MemberJob]   Missing refId: ${missingRefIdActivities.length}`);
-    console.warn(`[MemberJob]   Total accounted: ${totalGrouped}`);
-    console.warn(`[MemberJob]   Difference: ${totalActivitiesFetched - totalGrouped}`);
-  }
 
-  // NEW: Compare against aggregate targets
-  console.log(`\n[MemberJob] Comparing against aggregate targets...`);
-
-  const comparisonResults: Array<{
-    dungeonHash: string;
-    dungeonName: string;
-    target: number;
-    found: number;
-    difference: number;
-  }> = [];
-
+  // Compare against aggregate targets
   let perfectMatches = 0;
   let totalTarget = 0;
   let totalFound = 0;
@@ -265,145 +211,24 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       totalTarget += target;
       totalFound += found;
       
-      comparisonResults.push({
-        dungeonHash,
-        dungeonName: dungeon.displayName,
-        target,
-        found,
-        difference
-      });
-      
       if (difference === 0) {
         perfectMatches++;
-      } else {
+      } else if (difference !== 0) {
         console.warn(
-          `[MemberJob] ⚠️  ${dungeon.displayName}: ` +
-          `Target=${target}, Found=${found}, Diff=${difference > 0 ? '+' : ''}${difference}`
+          `[MemberJob] ${dungeon.displayName}: Target=${target}, Found=${found}, Diff=${difference > 0 ? '+' : ''}${difference}`
         );
       }
     }
   }
 
   const totalMissing = totalTarget - totalFound;
-
-  console.log(
-    `[MemberJob] Aggregate comparison summary: ` +
-    `Target=${totalTarget}, Found=${totalFound}, Missing=${totalMissing}, ` +
-    `Matches=${perfectMatches}/${comparisonResults.length}`
-  );
-
   if (totalMissing > 0) {
-    console.warn(
-      `[MemberJob] ❌ Missing ${totalMissing} completions in history ` +
-      `(${((totalMissing/totalTarget)*100).toFixed(1)}% of aggregate)`
-    );
-    console.warn(`[MemberJob] These completions exist in aggregate but NOT in activity history`);
-    console.warn(`[MemberJob] Possible causes:`);
-    console.warn(`[MemberJob]   • Activities without instance IDs (not in history)`);
-    console.warn(`[MemberJob]   • Private/hidden activities`);
-    console.warn(`[MemberJob]   • Activities from before history tracking`);
-    console.warn(`[MemberJob]   • API data inconsistency`);
-  } else if (totalMissing < 0) {
-    console.warn(
-      `[MemberJob] ⚠️  Found ${Math.abs(totalMissing)} MORE completions than aggregate ` +
-      `(unexpected - investigate)`
-    );
-  }
-
-  // Calculate total batches across all dungeons
-  let totalBatches = 0;
-  const dungeonBatchCounts: Record<string, number> = {};
-  
-  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
-    const dungeonHash = dungeon.hash;
-    const activities = activitiesByDungeon[dungeonHash] || [];
-    if (activities.length === 0) continue;
-
-    const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
-    if (completed.length === 0) continue;
-
-    // Check DB for previous stats
-    const prevRow = await env.DB.prepare(`
-      SELECT last_processed_date, total_clears
-      FROM member_dungeon_stats
-      WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
-    `).bind(job.clanId, job.membershipId, dungeonHash).first();
-
-    let cutoffDate: Date | null = null;
-    if (prevRow && (prevRow as any).last_processed_date) {
-      cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
-    }
-
-    const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
-
-    // Skip if fewer completions than DB (should not happen under normal circumstances)
-    // Equal counts are handled via date-based filtering below
-    if (completed.length < dbTotalClears) {
-      continue;
-    }
-
-    completed.sort((a, b) => {
-      const ta = a.period ? new Date(a.period).getTime() : 0;
-      const tb = b.period ? new Date(b.period).getTime() : 0;
-      return ta - tb;
-    });
-
-    // Determine which activities are new
-    let newActivities = completed;
-    
-    if (completed.length > dbTotalClears) {
-      // We have more completions than before
-      // Process only the NEW completions (the last N in chronological order by instance start time)
-      // Note: This is a heuristic since 'period' reflects instance start time, not completion time.
-      // For the character-switching case, this ensures we process recent instances even if they
-      // were started before the cutoff date but completed after.
-      // Assumption: Newer instances (by start time) are more likely to be new completions.
-      // Edge case: If old instances are completed out of order, they might be missed in this pass
-      // but will be caught in the next sync when the count increases further.
-      const newCount = completed.length - dbTotalClears;
-      newActivities = completed.slice(-newCount);
-    } else if (cutoffDate) {
-      // Same number of completions, filter by date for incremental updates
-      newActivities = completed.filter(a => {
-        try {
-          const actDate = new Date(a.period);
-          return actDate.getTime() > cutoffDate!.getTime();
-        } catch {
-          return true;
-        }
-      });
-    }
-
-    if (newActivities.length === 0) continue;
-
-    const batchCount = Math.ceil(newActivities.length / MAX_BATCH_SIZE);
-    totalBatches += batchCount;
-    dungeonBatchCounts[dungeonHash] = batchCount;
-  }
-
-  // Initialize MemberCoordinator if we have batches to process
-  if (totalBatches > 0) {
-    const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.membershipId);
-    const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
-    
-    await coordinator.fetch('https://internal/init', {
-      method: 'POST',
-      body: JSON.stringify({
-        membershipId: job.membershipId,
-        membershipType: job.membershipType,
-        clanId: job.clanId,
-        totalBatches,
-        dungeonBatches: dungeonBatchCounts
-      }),
-      headers: { 'Content-Type': 'application/json' },
-    });
+    console.warn(`[MemberJob] Missing ${totalMissing} completions (${((totalMissing/totalTarget)*100).toFixed(1)}% of aggregate)`);
   }
 
   // Queue per-dungeon jobs
   let totalQueued = 0;
-  let batchesQueued = 0;
+  const dungeonBatchCounts: Record<string, number> = {};
 
   for (const dungeon of ACTIVITY_REFERENCE_MAP) {
     const dungeonHash = dungeon.hash;
@@ -431,35 +256,26 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
 
-    // Skip if fewer completions than DB (should not happen under normal circumstances)
-    // Equal counts are handled via date-based filtering below
+    // Skip if fewer completions than DB (data inconsistency)
     if (completed.length < dbTotalClears) {
+      console.warn(`[MemberJob] ${dungeon.displayName}: Fewer completions than DB (${completed.length} < ${dbTotalClears})`);
       continue;
     }
 
-    // Sort by period ascending (oldest first)
+    // Sort by period ascending (oldest first) BEFORE filtering
     completed.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
       const tb = b.period ? new Date(b.period).getTime() : 0;
       return ta - tb;
     });
 
-    // Determine which activities are new
+    // Determine which activities are new using date-based filtering
+    // This ensures we only process activities that haven't been seen before
     let newActivities = completed;
     
-    if (completed.length > dbTotalClears) {
-      // We have more completions than before
-      // Process only the NEW completions (the last N in chronological order by instance start time)
-      // Note: This is a heuristic since 'period' reflects instance start time, not completion time.
-      // For the character-switching case, this ensures we process recent instances even if they
-      // were started before the cutoff date but completed after.
-      // Assumption: Newer instances (by start time) are more likely to be new completions.
-      // Edge case: If old instances are completed out of order, they might be missed in this pass
-      // but will be caught in the next sync when the count increases further.
-      const newCount = completed.length - dbTotalClears;
-      newActivities = completed.slice(-newCount);
-    } else if (cutoffDate) {
-      // Same number of completions, filter by date for incremental updates
+    if (cutoffDate) {
+      // We have a cutoff date - filter to activities AFTER that date
+      // This is the correct approach: after deduplication, filter by date
       newActivities = completed.filter(a => {
         try {
           const actDate = new Date(a.period);
@@ -468,7 +284,17 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
           return true;
         }
       });
+    } else if (dbTotalClears > 0) {
+      // No cutoff date but we have a DB count - this shouldn't happen normally
+      // Use count-based as fallback (process activities beyond what's in DB)
+      if (completed.length > dbTotalClears) {
+        const newCount = completed.length - dbTotalClears;
+        newActivities = completed.slice(-newCount);
+      } else {
+        newActivities = [];
+      }
     }
+    // If no cutoff date and no DB count, this is an initial sync - process all
 
     if (newActivities.length === 0) {
       continue;
@@ -487,6 +313,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       batches.push(activitiesPayload.slice(i, i + MAX_BATCH_SIZE));
     }
 
+    dungeonBatchCounts[dungeonHash] = batches.length;
+
     // Queue each batch
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
       await env.STATS_QUEUE.send({
@@ -499,16 +327,34 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       });
       
       totalQueued += batches[batchIndex].length;
-      totalBatches++;
     }
 
-    console.log(`[MemberJob] Queued ${batches.length} batch(es) for ${dungeon.displayName} (${activitiesPayload.length} activities)`);
+    console.log(`[MemberJob] Queued ${batches.length} batch(es) for ${dungeon.displayName} (${activitiesPayload.length} new activities)`);
+  }
+
+  // Initialize MemberCoordinator if we have batches to process
+  const totalBatches = Object.values(dungeonBatchCounts).reduce((sum, count) => sum + count, 0);
+  if (totalBatches > 0) {
+    const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.membershipId);
+    const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
+    
+    await coordinator.fetch('https://internal/init', {
+      method: 'POST',
+      body: JSON.stringify({
+        membershipId: job.membershipId,
+        membershipType: job.membershipType,
+        clanId: job.clanId,
+        totalBatches,
+        dungeonBatches: dungeonBatchCounts
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   await notifyRunComplete(env, job);
 
   const duration = Date.now() - startTime;
-  console.log(`[MemberJob] COMPLETE: ${job.displayName} | Queued: ${totalQueued} | Batches: ${totalBatches} | ${(duration/1000).toFixed(1)}s`);
+  console.log(`[MemberJob] Complete: ${job.displayName} | ${totalQueued} activities queued | ${(duration/1000).toFixed(1)}s`);
 }
 
 async function notifyRunComplete(env: Env, job: MemberJob): Promise<void> {
@@ -550,11 +396,6 @@ async function fetchAllActivities(
   const modes = [82, 2]; // Dungeon, Story
   let totalRateLimitRetries = 0;
 
-  console.log(`[MemberJob:Fetch] Starting activity fetch for ${characterIds.length} character(s)`);
-  characterIds.forEach((charId, idx) => {
-    console.log(`  Character ${idx + 1}: ${charId}`);
-  });
-
   // Helper to fetch a single page for a character
   async function fetchPage(charId: string, mode: number, page: number): Promise<any[]> {
     return await withRateLimit(
@@ -572,22 +413,17 @@ async function fetchAllActivities(
         } catch (err: any) {
           if (err.message && (err.message.includes('429') || err.message.includes('rate limit'))) {
             totalRateLimitRetries++;
-            console.warn(`[MemberJob:Fetch] RATE LIMITED - Retry #${totalRateLimitRetries}`);
           }
           throw err;
         }
       },
       3
     ).catch((err) => {
-      console.warn(`[MemberJob:Fetch] FAILED - CharID: ${charId}, Mode: ${mode}, Page: ${page}: ${err}`);
       return [];
     });
   }
 
   for (const mode of modes) {
-    const modeName = mode === 82 ? 'Dungeon' : mode === 2 ? 'Story' : `Mode-${mode}`;
-    console.log(`[MemberJob:Fetch] Fetching mode ${mode} (${modeName})...`);
-    
     // Track which characters still need more pages
     const activeCharacters = new Set(characterIds);
     let currentPage = 0;
@@ -617,15 +453,9 @@ async function fetchAllActivities(
             activeCharacters.delete(charId);
           }
         } else {
-          // On error, we could track and retry, but for now mark as done to avoid infinite loops
-          console.error(`[MemberJob:Fetch] Error in parallel fetch:`, result.reason);
+          // On error, mark as done to avoid infinite loops
         }
       }
-      
-      console.log(
-        `[MemberJob:Fetch] Mode ${mode} Page ${currentPage}: ` +
-        `${activeCharacters.size}/${characterIds.length} characters still active`
-      );
       
       currentPage++;
       
@@ -635,10 +465,8 @@ async function fetchAllActivities(
     }
   }
 
-  const totalActivities = Object.values(out).reduce((sum, acts) => sum + acts.length, 0);
-  console.log(`[MemberJob:Fetch] Complete: ${totalActivities} total activities fetched`);
   if (totalRateLimitRetries > 0) {
-    console.warn(`[MemberJob:Fetch] ⚠️  Total rate limit retries: ${totalRateLimitRetries}`);
+    console.warn(`[MemberJob:Fetch] Total rate limit retries: ${totalRateLimitRetries}`);
   }
 
   return out;
