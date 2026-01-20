@@ -1,14 +1,2 @@
-dedupe for activity section
-make activity section faster
-different character endpoint 
-fix pgcr popup
-dont use hidden pgcr route
-clean user cards (names)
-clean activity cards
-click player to see dungeon breakdown
-fix last updated to go on endpoint responsec
-cors fix
-cookie icon
-env not defined utils
-updateStats ttype error
-logging
+clean repo
+create archiecture diagram
