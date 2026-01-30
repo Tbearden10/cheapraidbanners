@@ -2,6 +2,7 @@
 // FILE: src/index.ts
 // Main worker entry point - handles HTTP routes and cron triggers
 // Logging reduced to key events only
+// FIXED: Added retry logic and fail-safe behavior to prevent marking all members inactive on API failures
 // ============================================================================
 
 import type { Env, MemberJob, StatsQueueJob } from './types';
@@ -118,11 +119,13 @@ export async function memberSyncCron(env: Env): Promise<void> {
 
   // Fetch current roster from Bungie
   const roster = (await fetchClanRoster(clanId, env.BUNGIE_API_KEY)) || [];
-
+  
+  // If roster fetch failed or returned empty, abort to prevent marking all members inactive
   if (!roster || roster.length === 0) {
-    console.log('[MemberSync[ Failed to fetch roster - aborting sync');
+    console.log('[MemberSync] Failed to fetch roster - aborting sync');
     return;
   }
+  
   const dbMembers = await getMembersList(env.DB, clanId, false);
 
   const dbMemberIds = new Set(dbMembers.map(m => m.membership_id));
@@ -181,6 +184,7 @@ export async function memberSyncCron(env: Env): Promise<void> {
 
   // Mark left members as inactive
   if (leftMembers.length > 0) {
+    console.log(`[MemberSync] Marking ${leftMembers.length} members as inactive`);
     for (const left of leftMembers) {
       try {
         await env.DB.prepare(
@@ -428,7 +432,14 @@ export default {
       if (url.pathname === '/members' && request.method === 'GET') {
         const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
         const members = await getMembersList(env.DB, clanId, true);
-        return jsonResponse({ members }, 200, request, env);
+        const cleanMembers = members.map(m => ({
+          membershipId: m.membership_id,
+          membershipType: m.membership_type,
+          displayName: m.display_name,
+          isOnline: m.is_online,
+          emblemPath: m.emblem_path
+        }));
+        return jsonResponse({ members: cleanMembers }, 200, request, env);
       }
 
       // GET /stats
@@ -494,101 +505,56 @@ export default {
       // GET /recent-activities
       if (url.pathname === '/recent-activities' && request.method === 'GET') {
         const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
-        const MEMBERS_TO_CHECK = 10;
-        const ACTIVITIES_PER_MEMBER = 1;
-        const TOTAL_ACTIVITIES = 3;
+        const ACTIVITIES_TO_RETURN = 5;
 
         try {
-          const roster = await fetchClanRoster(clanId, env.BUNGIE_API_KEY);
-          if (!roster || roster.length === 0) {
+          // Ultra-fast: Query DB for recent activities with instance IDs
+          const recentStats = await env.DB.prepare(`
+            SELECT 
+              cm.membership_id,
+              cm.membership_type,
+              cm.display_name,
+              cm.emblem_path,
+              mds.dungeon_hash,
+              mds.last_processed_date,
+              mds.last_processed_instance_id
+            FROM clan_members cm
+            JOIN member_dungeon_stats mds ON cm.clan_id = mds.clan_id AND cm.membership_id = mds.membership_id
+            WHERE cm.clan_id = ? 
+              AND cm.is_active = 1 
+              AND mds.last_processed_date IS NOT NULL
+              AND mds.last_processed_instance_id IS NOT NULL
+            ORDER BY RANDOM()
+            LIMIT ?
+          `).bind(clanId, ACTIVITIES_TO_RETURN).all();
+
+          if (!recentStats.results || recentStats.results.length === 0) {
             return jsonResponse([], 200, request, env);
           }
 
-          const sorted = roster
-            .filter((m: any) => m.membershipId && m.membershipType)
-            .sort((a: any, b: any) => {
-              const aMs = (a && a.lastOnlineStatusChange) ? Number(a.lastOnlineStatusChange) : 0;
-              const bMs = (b && b.lastOnlineStatusChange) ? Number(b.lastOnlineStatusChange) : 0;
-              return bMs - aMs;
-            })
-            .slice(0, MEMBERS_TO_CHECK);
+          // Load activity definitions for display
+          const { ACTIVITY_REFERENCE_MAP } = await import('./constants/activityReferenceMap');
+          const dungeonMap = new Map(ACTIVITY_REFERENCE_MAP.map(d => [d.hash, d]));
 
-          const allActivities: any[] = [];
-          
-          for (let i = 0; i < sorted.length; i++) {
-            const member = sorted[i];
-            try {
-              const characters = await fetchCharactersForMember(
-                member.membershipId,
-                member.membershipType,
-                env.BUNGIE_API_KEY
-              );
-              
-              if (!characters || characters.length === 0) continue;
-              
-              const activities = await fetchActivitiesForCharacter(
-                member.membershipType,
-                member.membershipId,
-                characters[0].characterId,
-                0,
-                0,
-                ACTIVITIES_PER_MEMBER,
-                env.BUNGIE_API_KEY
-              );
-              
-              if (!activities || activities.length === 0) continue;
-              
-              for (const act of activities) {
-                allActivities.push({
-                  ...act,
-                  memberDisplayName: member.displayName,
-                  membershipId: member.membershipId,
-                  membershipType: member.membershipType,
-                });
+          const activities = (recentStats.results as any[]).map((stat: any) => {
+            const dungeon = dungeonMap.get(stat.dungeon_hash);
+            return {
+              period: stat.last_processed_date,
+              memberDisplayName: stat.display_name,
+              membershipId: stat.membership_id,
+              membershipType: stat.membership_type,
+              activityDetails: {
+                instanceId: stat.last_processed_instance_id,
+                activityName: dungeon?.displayName || 'Unknown Activity',
+                dungeonHash: stat.dungeon_hash,
+              },
+              values: {
+                completed: { basic: { value: 1 } },
               }
-            } catch {
-              continue;
-            }
-          }
+            };
+          });
 
-          const sorted_activities = allActivities
-            .filter(a => a.period)
-            .sort((a, b) => new Date(b.period).getTime() - new Date(a.period).getTime())
-            .slice(0, TOTAL_ACTIVITIES);
-
-          const activityDefCache = new Map<string, any>();
-          
-          const enrichedActivities = await Promise.all(
-            sorted_activities.map(async (act) => {
-              try {
-                const activityHash = act.activityDetails?.directorActivityHash || act.activityDetails?.referenceId;
-                if (!activityHash) return act;
-
-                let activityDef = activityDefCache.get(String(activityHash));
-                if (!activityDef) {
-                  activityDef = await fetchActivityDefinition(String(activityHash), env.BUNGIE_API_KEY);
-                  if (activityDef) activityDefCache.set(String(activityHash), activityDef);
-                }
-
-                if (activityDef?.pgcrImage) {
-                  return {
-                    ...act,
-                    activityDetails: {
-                      ...act.activityDetails,
-                      pgcrImage: `https://www.bungie.net${activityDef.pgcrImage}`,
-                      activityName: activityDef.displayProperties?.name || 'Unknown Activity',
-                    }
-                  };
-                }
-
-                return act;
-              } catch {
-                return act;
-              }
-            })
-          );
-
-          return jsonResponse(enrichedActivities, 200, request, env);
+          return jsonResponse(activities, 200, request, env);
         } catch (err) {
           return jsonResponse({ error: 'Failed to fetch recent activities' }, 500, request, env);
         }

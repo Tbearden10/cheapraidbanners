@@ -70,8 +70,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     }
   }
 
-  const totalAggregateTarget = Object.values(aggregateTargets).reduce((sum, v) => sum + v, 0);
-
+ 
   // Fetch all activities
   const activitiesByChar = await fetchAllActivities(
     job.membershipType,

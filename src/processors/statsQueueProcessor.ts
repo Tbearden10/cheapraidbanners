@@ -2,6 +2,7 @@
 // FILE: src/processors/statsQueueProcessor.ts
 // OPTIMIZED: Fast wave-based processing matching statsProcessor.ts pattern
 // 30 activities per wave, 50ms delay, clean and simple
+// UPDATED: Now tracks last_processed_instance_id for recent activities
 // ============================================================================
 
 import type { Env, StatsQueueJob } from '../types';
@@ -53,6 +54,7 @@ async function writeIncremental(env: Env, data: {
   fullClearsDelta: number;
   playtimeDelta: number;
   lastProcessedDate: string | null;
+  lastProcessedInstanceId: string | null;
 }): Promise<void> {
   const now = Date.now();
   
@@ -60,8 +62,8 @@ async function writeIncremental(env: Env, data: {
     INSERT INTO member_dungeon_stats (
       clan_id, membership_id, membership_type, dungeon_hash,
       total_clears, total_full_clears, total_playtime_seconds,
-      last_processed_date, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      last_processed_date, last_processed_instance_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (clan_id, membership_id, dungeon_hash) DO UPDATE SET
       total_clears = total_clears + excluded.total_clears,
       total_full_clears = total_full_clears + excluded.total_full_clears,
@@ -71,6 +73,13 @@ async function writeIncremental(env: Env, data: {
              (last_processed_date IS NULL OR excluded.last_processed_date > last_processed_date)
         THEN excluded.last_processed_date
         ELSE last_processed_date
+      END,
+      last_processed_instance_id = CASE 
+        WHEN excluded.last_processed_instance_id IS NOT NULL AND 
+             excluded.last_processed_date IS NOT NULL AND
+             (last_processed_date IS NULL OR excluded.last_processed_date > last_processed_date)
+        THEN excluded.last_processed_instance_id
+        ELSE last_processed_instance_id
       END,
       updated_at = excluded.updated_at
   `).bind(
@@ -82,6 +91,7 @@ async function writeIncremental(env: Env, data: {
     data.fullClearsDelta,
     data.playtimeDelta,
     data.lastProcessedDate,
+    data.lastProcessedInstanceId,
     now,
     now
   ).run();
@@ -113,6 +123,7 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
   let fullClearsFound = 0;
   let totalPlaytime = 0;
   let latestActivityDate: string | null = null;
+  let latestInstanceId: string | null = null;
   let successCount = 0;
 
   // Process in batches of 30 (matching statsProcessor.ts)
@@ -130,6 +141,7 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
           isFullClear: determineClearType(pgcr, activity.date || ''),
           playtime: extractPlaytime(pgcr, job.membershipId),
           date: activity.date,
+          instanceId: activity.instanceId,
         };
       })
     );
@@ -140,8 +152,11 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
         successCount++;
         if (result.value.isFullClear) fullClearsFound++;
         totalPlaytime += result.value.playtime;
+        
+        // Track most recent activity
         if (result.value.date && (!latestActivityDate || result.value.date > latestActivityDate)) {
           latestActivityDate = result.value.date;
+          latestInstanceId = result.value.instanceId;
         }
       }
     }
@@ -162,6 +177,7 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
     fullClearsDelta: fullClearsFound,
     playtimeDelta: totalPlaytime,
     lastProcessedDate: latestActivityDate,
+    lastProcessedInstanceId: latestInstanceId,
   });
 
   // Report to MemberCoordinator if coordinatorId provided
