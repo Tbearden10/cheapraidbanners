@@ -146,16 +146,11 @@ async function loadMembers(forceRender = false) {
       if (!id) return;
       const normalized = {
         membershipId: id,
-        membership_type: Number(m.membership_type ?? m.membershipType ?? 0),
+    
         membershipType: Number(m.membership_type ?? m.membershipType ?? 0),
         displayName: m.displayName ?? m.display_name ?? 'Unknown',
-        display_name: m.displayName ?? m.display_name ?? 'Unknown',
         isOnline: Boolean(m.isOnline ?? m.is_online ?? false),
-        is_online: Boolean(m.isOnline ?? m.is_online ?? false),
-        lastProcessedDate: m.lastProcessedDate ?? m.last_processed_date ?? null,
-        last_processed_date: m.lastProcessedDate ?? m.last_processed_date ?? null,
         emblemPath: m.emblemPath ?? m.emblem_path ?? null,
-        emblem_path: m.emblemPath ?? m.emblem_path ?? null
       };
       window.__membersById.set(id, normalized);
     });

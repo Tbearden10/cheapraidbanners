@@ -324,15 +324,15 @@ body {
 
 .gallery-item {
   position: relative;
-  aspect-ratio: 1 / 1; /* Maintain square shape */
-  border: 3px solid var(--chocolate-chip); /* Ensure a visible border */
+  aspect-ratio: 1 / 1;
+  border: 3px solid var(--chocolate-chip);
   overflow: hidden;
   cursor: pointer;
   background-size: cover;
   background-position: center;
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.2);
 }
+
 
 .gallery-item:hover {
   transform: scale(1.05); /* Subtle hover effect */

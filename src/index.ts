@@ -387,7 +387,6 @@ async function fetchAllMemberStatsGrouped(db: any, clanId: string) {
       dungeonHash: String((r as any).dungeon_hash),
       totalFullClears: Number((r as any).total_full_clears ?? 0),
       totalPlaytimeSeconds: Number((r as any).total_playtime_seconds ?? 0),
-      lastProcessedDate: (r as any).last_processed_date ?? null,
     });
   }
   
@@ -432,6 +431,7 @@ export default {
       if (url.pathname === '/members' && request.method === 'GET') {
         const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
         const members = await getMembersList(env.DB, clanId, true);
+        // Example for /members
         const cleanMembers = members.map(m => ({
           membershipId: m.membership_id,
           membershipType: m.membership_type,
@@ -449,25 +449,20 @@ export default {
         const statsByMember = await fetchAllMemberStatsGrouped(env.DB, clanId);
 
         const membersWithStats = members.map((member) => ({
-          destinyUserInfo: {
-            membershipId: member.membership_id,
-            membershipType: Number(member.membership_type),
-            displayName: member.display_name,
-          },
-          isOnline: Boolean(member.is_online),
-          lastOnlineStatusChange: member.last_online_status_change ?? null,
-          lastOnlineStatusChangeResolved: (member as any).last_online_status_change_resolved ?? null,
-          emblemPath: member.emblem_path ?? null,
-          emblemBackgroundPath: member.emblem_background_path ?? null,
-          stats: statsByMember.get(String(member.membership_id)) || [],
-          lastProcessedDate: member.last_processed_date ?? null,
+          membershipId: member.membership_id,
+          displayName: member.display_name,
+          stats: statsByMember.get(String(member.membership_id)) || []
         }));
 
         const aggregateStats = await env.DB.prepare(`SELECT * FROM clan_aggregate_stats WHERE clan_id = ? ORDER BY dungeon_hash`).bind(clanId).all();
 
         return jsonResponse({
           members: membersWithStats,
-          aggregateStats: (aggregateStats.results || []),
+          aggregateStats: (aggregateStats.results || []).map((stat: any) => ({
+            dungeon_hash: stat.dungeon_hash,
+            total_full_clears: stat.total_full_clears,
+            total_playtime_seconds: stat.total_playtime_seconds
+          })),
           memberCount: members.length,
           fetchedAt: new Date().toISOString(),
         }, 200, request, env);
@@ -502,78 +497,103 @@ export default {
         }
       }
 
-      // GET /recent-activities
+      // GET /recent-activities (simplified)
       if (url.pathname === '/recent-activities' && request.method === 'GET') {
         const clanId = url.searchParams.get('clanId') || env.BUNGIE_CLAN_ID;
-        const ACTIVITIES_TO_RETURN = 5;
+        const ACTIVITIES_TO_RETURN = 3;
 
         try {
-          // Ultra-fast: Query DB for recent activities with instance IDs
+          // Step 1: Get 10 most recent active members
+          const recentMembers = await env.DB.prepare(`
+            SELECT membership_id
+            FROM clan_members
+            WHERE clan_id = ? AND is_active = 1
+            ORDER BY last_online_status_change DESC
+            LIMIT 10
+          `).bind(clanId).all();
+
+          if (!recentMembers.results || recentMembers.results.length === 0) {
+            return jsonResponse([], 200, request, env);
+          }
+
+          const memberIds = recentMembers.results.map(m => m.membership_id);
+
+          // Step 2: Get the most recent dungeon activity for each of these members
           const recentStats = await env.DB.prepare(`
-            SELECT 
-              cm.membership_id,
-              cm.membership_type,
-              cm.display_name,
-              cm.emblem_path,
-              mds.dungeon_hash,
-              mds.last_processed_date,
-              mds.last_processed_instance_id
-            FROM clan_members cm
-            JOIN member_dungeon_stats mds ON cm.clan_id = mds.clan_id AND cm.membership_id = mds.membership_id
-            WHERE cm.clan_id = ? 
-              AND cm.is_active = 1 
-              AND mds.last_processed_date IS NOT NULL
-              AND mds.last_processed_instance_id IS NOT NULL
-            ORDER BY RANDOM()
+            SELECT membership_id, dungeon_hash, last_processed_instance_id
+            FROM member_dungeon_stats
+            WHERE clan_id = ? AND membership_id IN (${memberIds.map(() => '?').join(',')})
+              AND last_processed_instance_id IS NOT NULL
+            ORDER BY last_processed_date DESC
             LIMIT ?
-          `).bind(clanId, ACTIVITIES_TO_RETURN).all();
+          `).bind(clanId, ...memberIds, ACTIVITIES_TO_RETURN * 2).all();
 
           if (!recentStats.results || recentStats.results.length === 0) {
             return jsonResponse([], 200, request, env);
           }
 
-          // Load activity definitions for display
-          const { ACTIVITY_REFERENCE_MAP } = await import('./constants/activityReferenceMap');
-          const dungeonMap = new Map(ACTIVITY_REFERENCE_MAP.map(d => [d.hash, d]));
+          // Step 3: Fetch PGCRs and activity images
+          const activities = await Promise.all(
+            recentStats.results.slice(0, ACTIVITIES_TO_RETURN).map(async (stat: any) => {
+              let duration = 0;
+              let completed = false;
+              let image = '';
 
-          const activities = (recentStats.results as any[]).map((stat: any) => {
-            const dungeon = dungeonMap.get(stat.dungeon_hash);
-            return {
-              period: stat.last_processed_date,
-              memberDisplayName: stat.display_name,
-              membershipId: stat.membership_id,
-              membershipType: stat.membership_type,
-              activityDetails: {
-                instanceId: stat.last_processed_instance_id,
-                activityName: dungeon?.displayName || 'Unknown Activity',
-                dungeonHash: stat.dungeon_hash,
-              },
-              values: {
-                completed: { basic: { value: 1 } },
+              try {
+                // Fetch PGCR
+                const pgcr = await fetchPGCR(stat.last_processed_instance_id, env.BUNGIE_API_KEY);
+                if (pgcr) {
+                  // Duration = longest timePlayedSeconds among all players
+                  const playerDurations = pgcr.entries?.map(e => e?.values?.timePlayedSeconds?.basic?.value ?? 0) || [];
+                  duration = Math.max(...playerDurations, 0);
+
+                  // Completion = did this member complete the dungeon?
+                  const memberEntry = pgcr.entries?.find(
+                    e => e?.player?.destinyUserInfo?.membershipId === stat.membership_id
+                  );
+                  completed = memberEntry?.values?.completed?.basic?.value === 1;
+
+                  // Fetch activity definition for image only
+                  const activityDef = await fetchActivityDefinition(String(stat.dungeon_hash), env.BUNGIE_API_KEY);
+                  if (activityDef?.pgcrImage) {
+                    image = `https://www.bungie.net${activityDef.pgcrImage}`;
+                  }
+                }
+              } catch (err) {
+                console.warn('[RecentActivities] Failed to fetch PGCR/activity image', stat.last_processed_instance_id, err);
               }
-            };
-          });
 
-          return jsonResponse(activities, 200, request, env);
+              return {
+                instanceId: stat.last_processed_instance_id,
+                completed,
+                duration,
+                image
+              };
+            })
+          );
+
+          // Only return valid activities
+          const validActivities = activities.filter(a => a.instanceId).slice(0, ACTIVITIES_TO_RETURN);
+
+          return jsonResponse(validActivities, 200, request, env);
+
         } catch (err) {
+          console.error('[RecentActivities] Error:', err);
           return jsonResponse({ error: 'Failed to fetch recent activities' }, 500, request, env);
         }
       }
 
+
+
+
       // GET /pgcr
       if (url.pathname === '/pgcr' && request.method === 'GET') {
         const instanceId = url.searchParams.get('instanceId');
-        
-        if (!instanceId) {
-          return jsonResponse({ error: 'Missing instanceId parameter' }, 400, request, env);
-        }
+        if (!instanceId) return jsonResponse({ error: 'Missing instanceId parameter' }, 400, request, env);
 
         try {
           const pgcrData = await fetchPGCR(instanceId, env.BUNGIE_API_KEY);
-          
-          if (!pgcrData) {
-            return jsonResponse({ error: 'PGCR not found' }, 404, request, env);
-          }
+          if (!pgcrData) return jsonResponse({ error: 'PGCR not found' }, 404, request, env);
 
           const activity = pgcrData.activityDetails || {};
           const activityHash = activity.directorActivityHash || activity.referenceId;
@@ -588,16 +608,16 @@ export default {
             const values = entry.values || {};
             const extended = entry.extended?.values || {};
 
+            const displayName = player.destinyUserInfo?.bungieGlobalDisplayName || player.destinyUserInfo?.displayName;
+            const nameCode = player.destinyUserInfo?.bungieGlobalDisplayNameCode;
+
             return {
-              membershipId: player.destinyUserInfo?.membershipId,
-              displayName: player.destinyUserInfo?.displayName,
-              bungieGlobalDisplayName: player.destinyUserInfo?.bungieGlobalDisplayName,
-              bungieGlobalDisplayNameCode: player.destinyUserInfo?.bungieGlobalDisplayNameCode,
+              bungieGlobalDisplayName: displayName,
+              bungieGlobalDisplayNameCode: nameCode,
               iconPath: player.destinyUserInfo?.iconPath ? `https://www.bungie.net${player.destinyUserInfo.iconPath}` : null,
               lightLevel: player.lightLevel,
               class: {
-                name: player.classType === 0 ? 'Titan' : player.classType === 1 ? 'Hunter' : player.classType === 2 ? 'Warlock' : 'Unknown',
-                type: player.classType
+                name: player.characterClass || 'Unknown'
               },
               completed: values.completed?.basic?.value === 1,
               timePlayedSeconds: values.timePlayedSeconds?.basic?.value || 0,
@@ -612,25 +632,23 @@ export default {
             };
           });
 
+          // --- FIX: compute activityDurationSeconds as longest timePlayedSeconds ---
+          const activityDurationSeconds = Math.max(...players.map(p => p.timePlayedSeconds), 0);
+
           return jsonResponse({
             activity: {
               name: activityDef?.displayProperties?.name || 'Unknown Activity',
-              description: activityDef?.displayProperties?.description || '',
               pgcrImage: activityDef?.pgcrImage ? `https://www.bungie.net${activityDef.pgcrImage}` : null,
-              instanceId: activity.instanceId,
-              mode: activity.mode,
-              modes: activity.modes || [],
             },
             period: pgcrData.period,
-            activityDurationSeconds: pgcrData.activityDurationSeconds || 0,
-            activityWasStartedFromBeginning: pgcrData.activityWasStartedFromBeginning || false,
-            startingPhaseIndex: pgcrData.startingPhaseIndex || 0,
+            activityDurationSeconds,
             players,
           }, 200, request, env);
         } catch (err) {
           return jsonResponse({ error: 'Failed to fetch PGCR' }, 500, request, env);
         }
       }
+
 
       // POST /admin/refresh
       if (url.pathname === '/admin/refresh' && request.method === 'POST') {

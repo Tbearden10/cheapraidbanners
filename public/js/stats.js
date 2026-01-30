@@ -1,12 +1,5 @@
-// stats.js - robust loader + normalizer for backend /stats response
-// Produces a stable shape used by the UI:
-// {
-//   dungeonClears: number,
-//   totalPlaytimeSeconds: number,
-//   perMember: [{ membershipId: string, totalFullClears: number, totalPlaytimeSeconds: number, stats: [...], lastProcessedDate }],
-//   memberCount: number,
-//   fetchedAt: string
-// }
+// stats.js - FIXED: Properly handles backend response format
+// Backend returns: { members: [...], aggregateStats: [...], memberCount, fetchedAt }
 
 let previousStatsData = null;
 
@@ -18,116 +11,86 @@ function getApiBase() {
 }
 
 /**
- * Normalize a backend /stats response into the UI-friendly shape.
- * The backend may include:
- * - aggregateStats: [{ dungeon_hash, total_full_clears, total_playtime_seconds }, ...]
- * - members: [{ membershipId, stats: [{ dungeonHash, totalFullClears, totalPlaytimeSeconds, instanceId }, ...] }, ...]
- * - memberCount, fetchedAt
+ * Normalize backend /stats response
+ * Backend format:
+ * {
+ *   members: [{ membershipId, displayName, stats: [{ dungeonHash, totalFullClears, totalPlaytimeSeconds }] }],
+ *   aggregateStats: [{ dungeon_hash, total_full_clears, total_playtime_seconds }],
+ *   memberCount,
+ *   fetchedAt
+ * }
  */
 function normalizeStatsResponse(resp) {
   if (!resp) return null;
 
   console.log('[Stats] Normalizing response:', resp);
 
-  // 1) overall aggregate: prefer a row where dungeon_hash === 'all', otherwise sum
+  // 1) Get totals from aggregateStats where dungeon_hash === 'all'
   let totalFull = 0;
   let totalPlay = 0;
+  
   if (Array.isArray(resp.aggregateStats) && resp.aggregateStats.length > 0) {
-    const allRow = resp.aggregateStats.find(r => String(r.dungeon_hash) === 'all' || r.dungeon_hash === 'all');
+    const allRow = resp.aggregateStats.find(r => String(r.dungeon_hash) === 'all');
     if (allRow) {
-      totalFull = Number(allRow.total_full_clears ?? allRow.totalFullClears ?? 0);
-      totalPlay = Number(allRow.total_playtime_seconds ?? allRow.totalPlaytimeSeconds ?? 0);
+      totalFull = Number(allRow.total_full_clears || 0);
+      totalPlay = Number(allRow.total_playtime_seconds || 0);
+      console.log('[Stats] Found "all" aggregate:', { totalFull, totalPlay });
     } else {
+      // Sum all dungeons if no "all" row
       for (const r of resp.aggregateStats) {
-        totalFull += Number(r.total_full_clears ?? r.totalFullClears ?? 0);
-        totalPlay += Number(r.total_playtime_seconds ?? r.totalPlaytimeSeconds ?? 0);
+        if (r.dungeon_hash !== 'all') {
+          totalFull += Number(r.total_full_clears || 0);
+          totalPlay += Number(r.total_playtime_seconds || 0);
+        }
       }
+      console.log('[Stats] Summed from individual dungeons:', { totalFull, totalPlay });
     }
   }
 
-  // 2) per-member aggregates: if backend provides members with stats arrays, preserve them
+  // 2) Build per-member stats from members array
   const perMember = [];
+  
   if (Array.isArray(resp.members) && resp.members.length > 0) {
     for (const m of resp.members) {
-      // membership id may be membershipId or membership_id
-      const membershipId = String(m.destinyUserInfo?.membershipId ?? m.membership_id ?? '');
+      const membershipId = String(m.membershipId || '');
+      if (!membershipId) continue;
+
       let memberFull = 0;
       let memberPlay = 0;
+      const statsArr = Array.isArray(m.stats) ? m.stats : [];
 
-      // prefer nested stats array on member (member.stats) if present
-      const statsArr = Array.isArray(m.stats) ? m.stats : Array.isArray(m.memberStats) ? m.memberStats : [];
-      
-      // Normalize each stat entry to handle both camelCase and snake_case
-      const normalizedStats = statsArr.map(s => ({
-        dungeonHash: s.dungeonHash ?? s.dungeon_hash,
-        totalFullClears: Number(s.totalFullClears ?? s.total_full_clears ?? 0),
-        totalPlaytimeSeconds: Number(s.totalPlaytimeSeconds ?? s.total_playtime_seconds ?? 0),
-        lastProcessedDate: s.lastProcessedDate ?? s.last_processed_date,
-        instanceId: s.instanceId ?? s.instance_id // CRITICAL for activities!
-      }));
-
-      if (normalizedStats.length > 0) {
-        for (const s of normalizedStats) {
-          memberFull += s.totalFullClears;
-          memberPlay += s.totalPlaytimeSeconds;
-        }
+      // Sum up member's stats across all dungeons
+      for (const s of statsArr) {
+        memberFull += Number(s.totalFullClears || 0);
+        memberPlay += Number(s.totalPlaytimeSeconds || 0);
       }
 
       perMember.push({
         membershipId,
         totalFullClears: memberFull,
         totalPlaytimeSeconds: memberPlay,
-        stats: normalizedStats, // Keep the full normalized stats array
-        lastProcessedDate: m.lastProcessedDate ?? m.last_processed_date ?? null
+        stats: statsArr, // Keep full stats array
+        lastProcessedDate: m.lastProcessedDate || null
       });
     }
   }
 
-  // 3) If backend provided a separate perMember list (flat), merge/add values
-  if (Array.isArray(resp.perMember) && resp.perMember.length > 0) {
-    const map = new Map(perMember.map(p => [p.membershipId, p]));
-    for (const pm of resp.perMember) {
-      const id = String(pm.membershipId ?? pm.membership_id ?? '');
-      const existing = map.get(id);
-      const full = Number(pm.totalFullClears ?? pm.total_full_clears ?? 0);
-      const play = Number(pm.totalPlaytimeSeconds ?? pm.total_playtime_seconds ?? 0);
-      const stats = pm.stats ?? pm.memberStats ?? [];
-      if (existing) {
-        existing.totalFullClears = existing.totalFullClears + full;
-        existing.totalPlaytimeSeconds = existing.totalPlaytimeSeconds + play;
-        // Merge stats arrays if present
-        if (Array.isArray(stats) && stats.length > 0) {
-          existing.stats = [...existing.stats, ...stats];
-        }
-      } else {
-        map.set(id, { 
-          membershipId: id, 
-          totalFullClears: full, 
-          totalPlaytimeSeconds: play,
-          stats: stats || [],
-          lastProcessedDate: pm.lastProcessedDate ?? pm.last_processed_date ?? null
-        });
-      }
-    }
-    // use mapped list
-    perMember.length = 0;
-    for (const v of map.values()) perMember.push(v);
-  }
+  console.log('[Stats] Normalized:', {
+    dungeonClears: totalFull,
+    totalPlaytimeSeconds: totalPlay,
+    perMemberCount: perMember.length
+  });
 
-  console.log('[Stats] Normalized perMember count:', perMember.length);
   if (perMember.length > 0) {
     console.log('[Stats] First member sample:', perMember[0]);
   }
 
-  // 4) If perMember is empty but aggregateStats exists and members list has memberCount,
-  //    we still want to expose memberCount and fetchedAt
-  const memberCount = Number(resp.memberCount ?? (Array.isArray(resp.members) ? resp.members.length : 0));
-
-  const fetchedAt = resp.fetchedAt ?? new Date().toISOString();
+  const memberCount = Number(resp.memberCount || perMember.length);
+  const fetchedAt = resp.fetchedAt || new Date().toISOString();
 
   return {
-    dungeonClears: Number(totalFull || 0),
-    totalPlaytimeSeconds: Number(totalPlay || 0),
+    dungeonClears: totalFull,
+    totalPlaytimeSeconds: totalPlay,
     perMember,
     memberCount,
     fetchedAt
@@ -153,18 +116,28 @@ function renderStatsLocal(data, forceRender = false) {
     return;
   }
 
+  console.log('[Stats] Rendering:', {
+    clears: data.dungeonClears,
+    playtime: data.totalPlaytimeSeconds
+  });
+
   if (dungeonEl && typeof data.dungeonClears !== 'undefined') {
-    // animateCounter will format numbers
-    if (window.__utils?.animateCounter) window.__utils.animateCounter(dungeonEl, data.dungeonClears);
-    else dungeonEl.textContent = String(data.dungeonClears);
+    if (window.__utils?.animateCounter) {
+      window.__utils.animateCounter(dungeonEl, data.dungeonClears);
+    } else {
+      dungeonEl.textContent = String(data.dungeonClears);
+    }
   }
 
   if (playtimeEl && typeof data.totalPlaytimeSeconds !== 'undefined') {
     const hours = Math.floor(data.totalPlaytimeSeconds / 3600);
-    if (window.__utils?.animateCounter) window.__utils.animateCounter(playtimeEl, hours);
-    else playtimeEl.textContent = String(hours) + 'h';
+    if (window.__utils?.animateCounter) {
+      window.__utils.animateCounter(playtimeEl, hours);
+    } else {
+      playtimeEl.textContent = String(hours) + 'h';
+    }
 
-    // Add 'h' suffix after animation completes (defensive)
+    // Add 'h' suffix after animation completes
     setTimeout(() => {
       if (playtimeEl && playtimeEl.textContent && !playtimeEl.textContent.includes('h')) {
         playtimeEl.textContent += 'h';
@@ -181,51 +154,31 @@ function renderStatsLocal(data, forceRender = false) {
 }
 
 /**
- * loadStats - fetch /stats from server, normalize into UI shape, render
+ * loadStats - fetch /stats from server, normalize, render
  */
 async function loadStats(forceRender = false) {
-  // Get API base at runtime
   const API_BASE = getApiBase();
-  
-  // Attempt server API first
   const statsUrl = new URL('/stats', API_BASE).toString();
+  
   console.log('[Stats] Fetching from:', statsUrl);
   
-  let raw = await (window.__utils?.fetchJson ? window.__utils.fetchJson(statsUrl) : fetch(statsUrl).then(r => r.ok ? r.json().catch(()=>null) : null).catch(()=>null));
+  const raw = await (window.__utils?.fetchJson 
+    ? window.__utils.fetchJson(statsUrl) 
+    : fetch(statsUrl).then(r => r.ok ? r.json().catch(()=>null) : null).catch(()=>null)
+  );
+
   if (!raw) {
-    console.warn('[Stats] /stats returned no data, using client fallback');
-    raw = await fetchStatsFallback();
+    console.error('[Stats] Failed to fetch stats');
+    return null;
   }
 
-  // Normalize regardless of source (server or fallback)
-  const normalized = normalizeStatsResponse(raw);
+  console.log('[Stats] Raw response:', raw);
 
+  const normalized = normalizeStatsResponse(raw);
   renderStatsLocal(normalized, forceRender);
   return normalized;
 }
 
-/**
- * Minimal fallback if /stats is completely unavailable.
- * Returns a shape compatible with normalizeStatsResponse
- */
-async function fetchStatsFallback() {
-  const API_BASE = getApiBase();
-  
-  // Minimal fallback: show member count and zeros for clears/playtime
-  const membersUrl = new URL('/members', API_BASE).toString();
-  const membersResp = await (window.__utils?.fetchJson ? window.__utils.fetchJson(membersUrl) : fetch(membersUrl).then(r => r.ok ? r.json().catch(()=>null) : null).catch(()=>null));
-  const members = (membersResp && (membersResp.members || membersResp)) || null;
-
-  const memberCount = members ? members.length : 0;
-  return {
-    aggregateStats: [],
-    members: members || [],
-    perMember: [],
-    memberCount,
-    fetchedAt: new Date().toISOString()
-  };
-}
-
-// expose for app usage
+// Expose for app usage
 window.loadStats = loadStats;
 window.renderStats = renderStatsLocal;
