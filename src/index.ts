@@ -118,6 +118,11 @@ export async function memberSyncCron(env: Env): Promise<void> {
 
   // Fetch current roster from Bungie
   const roster = (await fetchClanRoster(clanId, env.BUNGIE_API_KEY)) || [];
+
+  if (!roster || roster.length === 0) {
+    console.log('[MemberSync[ Failed to fetch roster - aborting sync');
+    return;
+  }
   const dbMembers = await getMembersList(env.DB, clanId, false);
 
   const dbMemberIds = new Set(dbMembers.map(m => m.membership_id));
