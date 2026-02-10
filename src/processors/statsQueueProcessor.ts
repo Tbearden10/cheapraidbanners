@@ -199,6 +199,15 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
       
       if (result.complete) {
         console.log(`[StatsQueue] All batches complete for ${job.membershipId}`);
+        
+        // Trigger aggregate recompute for the clan
+        try {
+          const { recomputeClanAggregateStats } = await import('../db/aggregateHelpers');
+          await recomputeClanAggregateStats(env.DB, job.clanId);
+          console.log(`[StatsQueue] Aggregate stats recomputed for clan ${job.clanId}`);
+        } catch (err) {
+          console.warn('[StatsQueue] Failed to recompute aggregate stats:', err);
+        }
       }
     } catch (err) {
       console.warn('[StatsQueue] Failed to report to MemberCoordinator:', err);
