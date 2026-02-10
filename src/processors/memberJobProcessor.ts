@@ -1,8 +1,4 @@
-// ============================================================================
-// FILE: src/processors/memberJobProcessor.ts
-// Clean member job processor with MemberCoordinator for batch aggregation
-// UPDATED: Added aggregate comparison, parallel fetching, pagination fix
-// ============================================================================
+// Member job processor - fetches and queues member activities
 
 import type { Env, MemberJob } from '../types';
 import { ACTIVITY_REFERENCE_MAP } from '../constants/activityReferenceMap';

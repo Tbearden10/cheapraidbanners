@@ -1,8 +1,4 @@
-// Enhanced database queries with proper total_clears vs total_full_clears tracking
-// Key improvements:
-// 1. Separate tracking of total_clears (all completed) vs total_full_clears (verified)
-// 2. Include last_online_status_change_prev and resolved timestamps in member queries
-// 3. Persist last_processed_instance_id for deterministic cutoff
+// Database queries for clan members and dungeon stats
 
 import type {
   D1Database,

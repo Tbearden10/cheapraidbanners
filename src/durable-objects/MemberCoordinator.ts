@@ -1,8 +1,4 @@
-// ============================================================================
-// FILE: src/durable-objects/MemberCoordinator.ts
-// Coordinates all batches for a single member across all dungeons
-// One DO per member, tracks progress and aggregates results
-// ============================================================================
+// MemberCoordinator - tracks batch completion for a single member
 
 export interface MemberBatchMetadata {
   membershipId: string;

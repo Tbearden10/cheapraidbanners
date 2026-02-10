@@ -1,9 +1,4 @@
-// ============================================================================
-// FILE: src/processors/statsQueueProcessor.ts
-// OPTIMIZED: Fast wave-based processing matching statsProcessor.ts pattern
-// 30 activities per wave, 50ms delay, clean and simple
-// UPDATED: Now tracks last_processed_instance_id for recent activities
-// ============================================================================
+// Stats queue processor - fetches PGCRs and updates DB
 
 import type { Env, StatsQueueJob } from '../types';
 import { fetchPGCR } from '../api/bungieApi';

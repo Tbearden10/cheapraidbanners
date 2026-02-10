@@ -1,9 +1,4 @@
-// ============================================================================
-// FILE: src/index.ts
 // Main worker entry point - handles HTTP routes and cron triggers
-// Logging reduced to key events only
-// FIXED: Added retry logic and fail-safe behavior to prevent marking all members inactive on API failures
-// ============================================================================
 
 import type { Env, MemberJob, StatsQueueJob } from './types';
 import {

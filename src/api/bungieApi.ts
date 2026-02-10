@@ -1,7 +1,4 @@
-// ============================================================================
-// FILE: src/api/bungieApi.ts
-// Clean, simple Bungie API client with basic retry logic
-// ============================================================================
+// Bungie API client with retry logic
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
