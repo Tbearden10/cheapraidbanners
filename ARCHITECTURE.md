@@ -80,6 +80,9 @@
            │  3. Extract playtime   │
            │  4. Update DB (delta)  │
            │  5. Notify coordinator │
+           │  6. Recompute clan     │
+           │     aggregates on      │
+           │     completion         │
            └────────────┬───────────┘
                         │
                         ▼
@@ -130,7 +133,8 @@
        ├─> Extract playtime for member
        ├─> Calculate deltas (new clears, full clears, time)
        ├─> Write to DB (incremental updates)
-       └─> Notify Member Coordinator
+       ├─> Notify Member Coordinator
+       └─> If member complete: Recompute clan aggregates
 
 4. Member Coordinator (Durable Object)
    └─> Track all batches for member
@@ -138,11 +142,12 @@
            ├─> Aggregate all results
            ├─> Update member_dungeon_stats (DB)
            └─> Cleanup coordinator state
+           (Aggregate recompute happens in Stats Queue Processor)
 ```
 
 ## Key Optimizations
 
-### 1. Aggregate Stats Comparison (NEW)
+### 1. Aggregate Stats Comparison
 **Problem**: Previously fetched activity history for all members, even if no new activities.
 
 **Solution**: 
@@ -151,16 +156,17 @@
 - Skip fetching activity history if numbers match
 - **Result**: Massive reduction in API calls and processing time
 
-### 2. Single Member Processing (NEW)
-**Problem**: New clan members had to wait for the next hourly cron to be processed.
+### 2. Auto-Process New Members
+**Problem**: New clan members had to wait for the next scheduled stats sync to be processed.
 
-**Solution**:
-- Added `/admin/process-member` endpoint
-- Accepts membershipId and queues immediately
-- Enables real-time processing on member join
-- **Result**: Instant stats for new members
+**Solution**: 
+- Detect new members in hourly member sync cron
+- Automatically queue new members for immediate processing
+- Same flow as clan-wide sync but only for new members
+- Aggregate stats are recomputed after each member completes
+- **Result**: New members get their stats within minutes of joining
 
-### 3. Removed RunTracker Durable Object (NEW)
+### 3. Removed RunTracker Durable Object
 **Problem**: RunTracker added complexity with minimal benefit.
 
 **Solution**:
@@ -194,9 +200,11 @@
 
 | Time (UTC) | Trigger | Purpose |
 |------------|---------|---------|
-| Every hour (`:00`) | Member Sync | Fetch roster, track online status |
+| Every hour (`:00`) | Member Sync | Fetch roster, track online status, auto-process new members |
 | Daily at 19:00 | Stats Sync | Queue members with new activities |
-| Daily at 20:00 | Aggregate Recompute | Recalculate clan totals |
+| Daily at 20:00 | Aggregate Recompute | Recalculate clan totals (backup/safety) |
+
+Note: Aggregate stats are also recomputed immediately after each member completes processing.
 
 ## API Endpoints
 
@@ -210,7 +218,6 @@
 ### Admin Endpoints (Authenticated)
 - `POST /admin/refresh` - Force member/stats sync
 - `POST /admin/recompute` - Force aggregate recalculation
-- `POST /admin/process-member` - Process single member immediately (NEW)
 
 ### Debug Endpoints
 - `GET /debug/user-completions` - Deep dive into member's completion data

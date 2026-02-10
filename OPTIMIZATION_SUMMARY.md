@@ -7,14 +7,16 @@
 - **Files Deleted**: `src/durable-objects/RunTracker.ts`
 - **Impact**: Simplified architecture by removing unnecessary coordination layer. The daily aggregate recompute cron (20:00 UTC) is sufficient for maintaining accurate clan statistics.
 
-### 2. Added Single Member Processing ✅
-- **Files Modified**: `src/index.ts`
-- **New Endpoint**: `POST /admin/process-member`
-  - Accepts: `membershipId`, `membershipType`, `clanId` (optional)
-  - Validates member exists and is active
-  - Queues member immediately for processing
-- **Use Case**: When a new clan member joins, trigger immediate stats processing instead of waiting for the next cron
-- **Impact**: Real-time stats updates for new members
+### 2. Auto-Process New Members ✅
+- **Files Modified**: `src/index.ts`, `src/processors/statsQueueProcessor.ts`
+- **Logic**:
+  - Member sync cron detects new members
+  - Automatically queues new members for immediate processing
+  - Uses same flow as clan-wide sync
+  - No manual endpoint needed
+  - Aggregate stats recomputed after each member completes
+- **Use Case**: When a new clan member joins, their stats are processed within minutes
+- **Impact**: New members get stats immediately without waiting for daily cron
 
 ### 3. Aggregate Stats Optimization ✅
 - **Files Modified**: `src/processors/memberJobProcessor.ts`
@@ -76,10 +78,11 @@
 5. ✅ TypeScript types validated
 
 ### Manual Testing Recommended
-1. Test `/admin/process-member` endpoint with a real member
+1. Verify new members are automatically queued when detected
 2. Monitor logs to verify aggregate comparison is working
 3. Verify members are being skipped when no new activities
-4. Confirm aggregate recompute cron still functions correctly
+4. Confirm aggregate recompute triggers after member completion
+5. Confirm aggregate recompute cron still functions correctly
 
 ## Deployment Notes
 
@@ -90,7 +93,8 @@
 - Queue configurations unchanged
 
 ### New Functionality
-- `/admin/process-member` endpoint (requires authentication)
+- Auto-processing of new members when detected in member sync cron
+- Aggregate stats recompute after single member completion
 
 ### Configuration Changes
 - Removed `RUN_TRACKER` durable object binding
@@ -105,9 +109,11 @@
 4. **Error Rate**: Should remain low with better rate limit handling
 
 ### Log Indicators
+- `[MemberSync] Processing {X} new members immediately` ℹ️ New members detected
 - `[MemberJob] {member}: No new activities (aggregate matches DB) - skipped` ✅ Good
 - `[MemberJob] {member}: New activities in {dungeons}` ℹ️ Normal
 - `[StatsSync] Processing {X}/{total} members` ℹ️ Should be low (X < 10)
+- `[StatsQueue] Aggregate stats recomputed for clan {clanId}` ℹ️ After member completion
 
 ## Rollback Plan
 
