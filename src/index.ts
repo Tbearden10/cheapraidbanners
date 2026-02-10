@@ -101,6 +101,12 @@ function checkRateLimit(identifier: string, maxRequests = 100, windowMs = 60000)
   return true;
 }
 
+function formatDisplayName(member: any): string {
+  return member.bungieGlobalDisplayNameCode
+    ? `${member.bungieGlobalDisplayName}#${member.bungieGlobalDisplayNameCode}`
+    : member.bungieGlobalDisplayName || member.displayName;
+}
+
 // ============================================================================
 // MEMBER SYNC CRON - Every 30 minutes
 // ============================================================================
@@ -138,9 +144,7 @@ export async function memberSyncCron(env: Env): Promise<void> {
   for (let i = 0; i < roster.length; i++) {
     const rawMember = roster[i];
     const member = { ...rawMember };
-    const displayName = member.bungieGlobalDisplayNameCode
-      ? `${member.bungieGlobalDisplayName}#${member.bungieGlobalDisplayNameCode}`
-      : member.bungieGlobalDisplayName || member.displayName;
+    const displayName = formatDisplayName(member);
 
     try {
       // Enrich emblem (best-effort) — suppress per-member debug
@@ -200,9 +204,7 @@ export async function memberSyncCron(env: Env): Promise<void> {
 
         const lastProcessedDate = prevRow ? (prevRow as any).last_processed_date ?? null : null;
 
-        const displayName = newMember.bungieGlobalDisplayNameCode
-          ? `${newMember.bungieGlobalDisplayName}#${newMember.bungieGlobalDisplayNameCode}`
-          : newMember.bungieGlobalDisplayName || newMember.displayName;
+        const displayName = formatDisplayName(newMember);
 
         await env.MEMBER_STATS_QUEUE.send({
           clanId,

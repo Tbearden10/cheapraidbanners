@@ -2,6 +2,7 @@
 
 import type { Env, StatsQueueJob } from '../types';
 import { fetchPGCR } from '../api/bungieApi';
+import { recomputeClanAggregateStats } from '../db/aggregateHelpers';
 
 const BEYOND_LIGHT_START_MS = Date.parse('2020-11-10T17:00:00.000Z');
 const WITCH_QUEEN_START_MS = Date.parse('2022-02-22T17:00:00.000Z');
@@ -202,7 +203,6 @@ export async function processStatsQueueJob(env: Env, job: StatsQueueJob): Promis
         
         // Trigger aggregate recompute for the clan
         try {
-          const { recomputeClanAggregateStats } = await import('../db/aggregateHelpers');
           await recomputeClanAggregateStats(env.DB, job.clanId);
           console.log(`[StatsQueue] Aggregate stats recomputed for clan ${job.clanId}`);
         } catch (err) {
