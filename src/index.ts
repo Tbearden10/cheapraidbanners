@@ -18,9 +18,7 @@ import { getMembersList, upsertClanMember } from './db/queries';
 import { processMemberJob } from './processors/memberJobProcessor';
 import { processStatsQueueJob } from './processors/statsQueueProcessor';
 
-
 // Export Durable Objects
-export { RunTracker } from './durable-objects/RunTracker';
 export { MemberCoordinator } from './durable-objects/MemberCoordinator'
 
 // CORS Configuration
@@ -311,29 +309,6 @@ async function statsSyncCron(env: Env, options?: { force?: boolean }): Promise<v
   }
 
   const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-  try {
-    const trackerId = env.RUN_TRACKER.idFromName(`run-tracker-${clanId}`);
-    const tracker = env.RUN_TRACKER.get(trackerId);
-    const res = await tracker.fetch('https://internal/init', {
-      method: 'POST',
-      body: JSON.stringify({
-        runId,
-        clanId,
-        expectedCount: membersToProcess.length,
-      }),
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-
-    try {
-      await res.text();
-    } catch (e) {
-      try { res.body?.cancel(); } catch {}
-    }
-  } catch (err) {
-    console.warn('[StatsSync] RunTracker init failed:', String(err));
-  }
 
   // Queue members sequentially
   let queuedCount = 0;

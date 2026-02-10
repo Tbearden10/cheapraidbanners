@@ -31,7 +31,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
   if (!characters || characters.length === 0) {
     console.log(`[MemberJob] No characters found for ${job.displayName}`);
-    await notifyRunComplete(env, job);
     return;
   }
 
@@ -350,37 +349,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     });
   }
 
-  await notifyRunComplete(env, job);
-
   const duration = Date.now() - startTime;
   console.log(`[MemberJob] Complete: ${job.displayName} | ${totalQueued} activities queued | ${(duration/1000).toFixed(1)}s`);
-}
-
-async function notifyRunComplete(env: Env, job: MemberJob): Promise<void> {
-  if (!job.runId) return;
-  
-  try {
-    const trackerId = env.RUN_TRACKER.idFromName(`run-tracker-${job.clanId}`);
-    const tracker = env.RUN_TRACKER.get(trackerId);
-    
-    const res = await tracker.fetch('https://internal/complete', {
-      method: 'POST',
-      body: JSON.stringify({
-        runId: job.runId,
-        membershipId: job.membershipId,
-      }),
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-    // Consume body
-    try {
-      await res.text();
-    } catch (e) {
-      try { res.body?.cancel(); } catch {}
-    }
-  } catch (err) {
-    console.warn('[MemberJob] Failed to notify RunTracker:', err);
-  }
 }
 
 async function fetchAllActivities(
