@@ -256,7 +256,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       
       if (difference === 0) {
         perfectMatches++;
-      } else if (Math.abs(difference) > 0) {
+      } else {
         console.warn(
           `[MemberJob] ${dungeon.displayName}: Bungie=${target}, Fetched=${found}, Diff=${difference > 0 ? '+' : ''}${difference}`
         );

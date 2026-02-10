@@ -70,7 +70,7 @@ export interface Env {
   STATS_QUEUE: QueueBinding<StatsQueueJob>;
   
   // Durable Objects
-  BATCH_COORDINATOR: DurableObjectNamespace;
+  MEMBER_COORDINATOR: DurableObjectNamespace;
 }
 
 export interface ClanMemberRow {
