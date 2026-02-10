@@ -666,6 +666,59 @@ export default {
         return jsonResponse({ success: true, clanId }, 200, request, env);
       }
 
+      // POST /admin/process-member - Process single member immediately
+      if (url.pathname === '/admin/process-member' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({} as any));
+        const membershipId = String(body.membershipId || '');
+        const membershipType = Number(body.membershipType || 0);
+        const clanId = String(body.clanId ?? env.BUNGIE_CLAN_ID);
+
+        if (!membershipId || !membershipType) {
+          return jsonResponse({ 
+            error: 'Missing required fields: membershipId, membershipType' 
+          }, 400, request, env);
+        }
+
+        // Get member details from DB
+        const member = await env.DB.prepare(`
+          SELECT * FROM clan_members 
+          WHERE clan_id = ? AND membership_id = ? AND is_active = 1
+        `).bind(clanId, membershipId).first();
+
+        if (!member) {
+          return jsonResponse({ 
+            error: 'Member not found or inactive' 
+          }, 404, request, env);
+        }
+
+        // Get last processed date
+        const prevRow = await env.DB.prepare(`
+          SELECT MAX(last_processed_date) AS last_processed_date
+          FROM member_dungeon_stats
+          WHERE clan_id = ? AND membership_id = ?
+        `).bind(clanId, membershipId).first();
+
+        const lastProcessedDate = prevRow ? (prevRow as any).last_processed_date ?? null : null;
+
+        // Queue the member for processing
+        await env.MEMBER_STATS_QUEUE.send({
+          clanId,
+          membershipId,
+          membershipType,
+          displayName: (member as any).display_name,
+          lastProcessedDate,
+        });
+
+        console.log(`[Admin] Queued single member: ${(member as any).display_name}`);
+
+        return jsonResponse({ 
+          success: true, 
+          membershipId,
+          displayName: (member as any).display_name,
+          queued: true 
+        }, 200, request, env);
+      }
+
       // GET /debug/user-completions - Debug endpoint to check completion counts for a single user
       if (url.pathname === '/debug/user-completions' && request.method === 'GET') {
         const membershipId = url.searchParams.get('membershipId');
