@@ -1,5 +1,4 @@
-// Consolidated TypeScript types for the Clan Stats app.
-// Export the D1Database type (and other types) so all modules can import them.
+// TypeScript types for the Clan Stats app
 
 export interface D1PreparedStatement {
   bind(...args: any[]): D1PreparedStatement;
@@ -13,7 +12,6 @@ export interface D1Database {
   batch?(queries: Array<D1PreparedStatement | { sql: string; bindings?: any[] }>): Promise<any>;
 }
 
-/** Queue / Durable Object minimal types used by the app */
 export interface QueueMessage<T = any> {
   body: T;
   ack(): void;
@@ -28,9 +26,6 @@ export interface QueueBinding<T = any> {
   send(msg: T): Promise<void>;
 }
 
-/**
- * Durable Object storage API (minimal)
- */
 export interface DurableObjectStorage {
   get(key: string): Promise<any>;
   put(key: string, value: any): Promise<void>;
@@ -75,11 +70,9 @@ export interface Env {
   STATS_QUEUE: QueueBinding<StatsQueueJob>;
   
   // Durable Objects
-  BATCH_COORDINATOR: DurableObjectNamespace;
-  RUN_TRACKER: DurableObjectNamespace;
+  MEMBER_COORDINATOR: DurableObjectNamespace;
 }
 
-/** Shapes matching DB rows (nullable where appropriate) */
 export interface ClanMemberRow {
   id?: number;
   clan_id: string;
@@ -88,9 +81,9 @@ export interface ClanMemberRow {
   display_name: string;
   is_online: number;
   last_online_status_change?: number | null;
-  last_online_status_change_prev?: number | null;               // added
-  last_online_status_change_resolved?: number | null;           // added
-  last_online_status_change_resolved_prev?: number | null;      // added
+  last_online_status_change_prev?: number | null;
+  last_online_status_change_resolved?: number | null;
+  last_online_status_change_resolved_prev?: number | null;
   join_date?: string | null;
   emblem_path?: string | null;
   emblem_background_path?: string | null;
@@ -106,7 +99,7 @@ export interface MemberDungeonStatsRow {
   membership_id: string;
   membership_type: number;
   dungeon_hash: string;
-  total_clears?: number;                // added (all completions)
+  total_clears?: number;
   total_full_clears: number;
   total_playtime_seconds: number;
   last_processed_date?: string | null;
@@ -118,7 +111,7 @@ export interface ClanAggregateStatsRow {
   id?: number;
   clan_id: string;
   dungeon_hash: string;
-  total_clears?: number;                // added (all completions)
+  total_clears?: number;
   total_full_clears: number;
   total_playtime_seconds: number;
   active_member_count: number;

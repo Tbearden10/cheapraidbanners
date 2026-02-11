@@ -1,8 +1,4 @@
-// ============================================================================
-// FILE: src/processors/memberJobProcessor.ts
-// Clean member job processor with MemberCoordinator for batch aggregation
-// UPDATED: Added aggregate comparison, parallel fetching, pagination fix
-// ============================================================================
+// Member job processor - fetches and queues member activities
 
 import type { Env, MemberJob } from '../types';
 import { ACTIVITY_REFERENCE_MAP } from '../constants/activityReferenceMap';
@@ -31,11 +27,10 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
 
   if (!characters || characters.length === 0) {
     console.log(`[MemberJob] No characters found for ${job.displayName}`);
-    await notifyRunComplete(env, job);
     return;
   }
 
-  // Fetch aggregate targets for comparison
+  // Fetch aggregate targets from Bungie API
   const aggregateTargets: Record<string, number> = {};
 
   // Build reference map for looking up dungeon hashes from activity hashes
@@ -70,8 +65,57 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     }
   }
 
+  // Fetch current DB stats for comparison
+  const dbStats: Record<string, number> = {};
+  const dbStatsRows = await env.DB.prepare(`
+    SELECT dungeon_hash, COALESCE(total_clears, 0) as total_clears
+    FROM member_dungeon_stats
+    WHERE clan_id = ? AND membership_id = ?
+  `).bind(job.clanId, job.membershipId).all();
+
+  for (const row of (dbStatsRows.results || [])) {
+    const dungeonHash = String((row as any).dungeon_hash);
+    const totalClears = Number((row as any).total_clears || 0);
+    dbStats[dungeonHash] = totalClears;
+  }
+
+  // Compare aggregate stats with DB stats
+  let needsProcessing = false;
+  const comparison: Record<string, { bungie: number; db: number; diff: number }> = {};
+
+  for (const dungeon of ACTIVITY_REFERENCE_MAP) {
+    const dungeonHash = dungeon.hash;
+    const bungieCount = aggregateTargets[dungeonHash] || 0;
+    const dbCount = dbStats[dungeonHash] || 0;
+    const diff = bungieCount - dbCount;
+
+    comparison[dungeonHash] = { bungie: bungieCount, db: dbCount, diff };
+
+    if (diff !== 0) {
+      needsProcessing = true;
+    }
+  }
+
+  // If no new activities, skip processing
+  if (!needsProcessing) {
+    console.log(`[MemberJob] ${job.displayName}: No new activities (aggregate matches DB) - skipped`);
+    return;
+  }
+
+  // Log what's changed
+  const changedDungeons = Object.entries(comparison)
+    .filter(([_, stats]) => stats.diff > 0)
+    .map(([hash, stats]) => {
+      const dungeon = ACTIVITY_REFERENCE_MAP.find(d => d.hash === hash);
+      return `${dungeon?.displayName || hash}(+${stats.diff})`;
+    });
+
+  if (changedDungeons.length > 0) {
+    console.log(`[MemberJob] ${job.displayName}: New activities in ${changedDungeons.join(', ')}`);
+  }
+
  
-  // Fetch all activities
+  // Fetch all activities (only if needed)
   const activitiesByChar = await fetchAllActivities(
     job.membershipType,
     job.membershipId,
@@ -192,7 +236,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     }
   }
 
-  // Compare against aggregate targets
+  // Compare against aggregate targets (already calculated above)
   let perfectMatches = 0;
   let totalTarget = 0;
   let totalFound = 0;
@@ -212,17 +256,16 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
       
       if (difference === 0) {
         perfectMatches++;
-      } else if (difference !== 0) {
+      } else {
         console.warn(
-          `[MemberJob] ${dungeon.displayName}: Target=${target}, Found=${found}, Diff=${difference > 0 ? '+' : ''}${difference}`
+          `[MemberJob] ${dungeon.displayName}: Bungie=${target}, Fetched=${found}, Diff=${difference > 0 ? '+' : ''}${difference}`
         );
       }
     }
   }
 
-  const totalMissing = totalTarget - totalFound;
-  if (totalMissing > 0) {
-    console.warn(`[MemberJob] Missing ${totalMissing} completions (${((totalMissing/totalTarget)*100).toFixed(1)}% of aggregate)`);
+  if (totalTarget > totalFound) {
+    console.warn(`[MemberJob] Missing ${totalTarget - totalFound} activities in fetch (${((1 - totalFound/totalTarget)*100).toFixed(1)}% gap)`);
   }
 
   // Queue per-dungeon jobs
@@ -350,37 +393,8 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     });
   }
 
-  await notifyRunComplete(env, job);
-
   const duration = Date.now() - startTime;
   console.log(`[MemberJob] Complete: ${job.displayName} | ${totalQueued} activities queued | ${(duration/1000).toFixed(1)}s`);
-}
-
-async function notifyRunComplete(env: Env, job: MemberJob): Promise<void> {
-  if (!job.runId) return;
-  
-  try {
-    const trackerId = env.RUN_TRACKER.idFromName(`run-tracker-${job.clanId}`);
-    const tracker = env.RUN_TRACKER.get(trackerId);
-    
-    const res = await tracker.fetch('https://internal/complete', {
-      method: 'POST',
-      body: JSON.stringify({
-        runId: job.runId,
-        membershipId: job.membershipId,
-      }),
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-    // Consume body
-    try {
-      await res.text();
-    } catch (e) {
-      try { res.body?.cancel(); } catch {}
-    }
-  } catch (err) {
-    console.warn('[MemberJob] Failed to notify RunTracker:', err);
-  }
 }
 
 async function fetchAllActivities(

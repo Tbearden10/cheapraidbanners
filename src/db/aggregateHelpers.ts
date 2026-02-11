@@ -1,18 +1,9 @@
-// Simplified aggregate helpers with CLEAR delta logic
-// Key: Apply deltas correctly, always use cumulative values
+// Aggregate helpers for clan statistics
 
 import type { D1Database } from '../types';
 
 /**
  * Apply incremental deltas to clan aggregates
- * 
- * IMPORTANT: All delta values are INCREMENTAL (what to ADD)
- * The DB stores CUMULATIVE totals
- * 
- * @param clearsDelta - New clears to ADD (from this processing run)
- * @param fullClearsDelta - New full clears to ADD (from this processing run)
- * @param playtimeDelta - New playtime to ADD (from this processing run)
- * @param isNewRow - True if member+dungeon combo is new (increment member count)
  */
 export async function applyClanAggregateDelta(
   db: D1Database,

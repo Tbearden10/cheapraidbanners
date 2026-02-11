@@ -43,11 +43,6 @@ dead_letter_queue = "stats-dlq"
 max_concurrency = 1
 
 # ===== DURABLE OBJECTS =====
-# RunTracker (optional progress tracking & aggregate recomputation)
-
-[[durable_objects.bindings]]
-name = "RUN_TRACKER"
-class_name = "RunTracker"
 
 [[durable_objects.bindings]]
 name = "MEMBER_COORDINATOR"
@@ -108,10 +103,6 @@ max_batch_size = 1
 max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "stats-dlq-local"
-
-[[env.dev.durable_objects.bindings]]
-name = "RUN_TRACKER"
-class_name = "RunTracker"
 
 [[env.dev.durable_objects.bindings]]
 name = "MEMBER_COORDINATOR"

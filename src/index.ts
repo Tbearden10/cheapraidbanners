@@ -1,9 +1,4 @@
-// ============================================================================
-// FILE: src/index.ts
 // Main worker entry point - handles HTTP routes and cron triggers
-// Logging reduced to key events only
-// FIXED: Added retry logic and fail-safe behavior to prevent marking all members inactive on API failures
-// ============================================================================
 
 import type { Env, MemberJob, StatsQueueJob } from './types';
 import {
@@ -18,9 +13,7 @@ import { getMembersList, upsertClanMember } from './db/queries';
 import { processMemberJob } from './processors/memberJobProcessor';
 import { processStatsQueueJob } from './processors/statsQueueProcessor';
 
-
 // Export Durable Objects
-export { RunTracker } from './durable-objects/RunTracker';
 export { MemberCoordinator } from './durable-objects/MemberCoordinator'
 
 // CORS Configuration
@@ -108,6 +101,12 @@ function checkRateLimit(identifier: string, maxRequests = 100, windowMs = 60000)
   return true;
 }
 
+function formatDisplayName(member: any): string {
+  return member.bungieGlobalDisplayNameCode
+    ? `${member.bungieGlobalDisplayName}#${member.bungieGlobalDisplayNameCode}`
+    : member.bungieGlobalDisplayName || member.displayName;
+}
+
 // ============================================================================
 // MEMBER SYNC CRON - Every 30 minutes
 // ============================================================================
@@ -145,9 +144,7 @@ export async function memberSyncCron(env: Env): Promise<void> {
   for (let i = 0; i < roster.length; i++) {
     const rawMember = roster[i];
     const member = { ...rawMember };
-    const displayName = member.bungieGlobalDisplayNameCode
-      ? `${member.bungieGlobalDisplayName}#${member.bungieGlobalDisplayNameCode}`
-      : member.bungieGlobalDisplayName || member.displayName;
+    const displayName = formatDisplayName(member);
 
     try {
       // Enrich emblem (best-effort) — suppress per-member debug
@@ -191,6 +188,34 @@ export async function memberSyncCron(env: Env): Promise<void> {
           `UPDATE clan_members SET is_active = 0, updated_at = ? WHERE clan_id = ? AND membership_id = ?`
         ).bind(Date.now(), clanId, left.membership_id).run();
       } catch {}
+    }
+  }
+
+  // Process new members immediately
+  if (newMembers.length > 0) {
+    console.log(`[MemberSync] Processing ${newMembers.length} new members immediately`);
+    for (const newMember of newMembers) {
+      try {
+        const prevRow = await env.DB.prepare(`
+          SELECT MAX(last_processed_date) AS last_processed_date
+          FROM member_dungeon_stats
+          WHERE clan_id = ? AND membership_id = ?
+        `).bind(clanId, newMember.membershipId).first();
+
+        const lastProcessedDate = prevRow ? (prevRow as any).last_processed_date ?? null : null;
+
+        const displayName = formatDisplayName(newMember);
+
+        await env.MEMBER_STATS_QUEUE.send({
+          clanId,
+          membershipId: newMember.membershipId,
+          membershipType: newMember.membershipType,
+          displayName,
+          lastProcessedDate,
+        });
+      } catch (err) {
+        console.warn(`[MemberSync] Failed to queue new member ${newMember.membershipId}:`, err);
+      }
     }
   }
 
@@ -311,29 +336,6 @@ async function statsSyncCron(env: Env, options?: { force?: boolean }): Promise<v
   }
 
   const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-  try {
-    const trackerId = env.RUN_TRACKER.idFromName(`run-tracker-${clanId}`);
-    const tracker = env.RUN_TRACKER.get(trackerId);
-    const res = await tracker.fetch('https://internal/init', {
-      method: 'POST',
-      body: JSON.stringify({
-        runId,
-        clanId,
-        expectedCount: membersToProcess.length,
-      }),
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-
-    try {
-      await res.text();
-    } catch (e) {
-      try { res.body?.cancel(); } catch {}
-    }
-  } catch (err) {
-    console.warn('[StatsSync] RunTracker init failed:', String(err));
-  }
 
   // Queue members sequentially
   let queuedCount = 0;
