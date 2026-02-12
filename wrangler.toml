@@ -42,6 +42,20 @@ max_retries = 3
 dead_letter_queue = "stats-dlq"
 max_concurrency = 1
 
+# ===== DURABLE OBJECT MIGRATIONS =====
+# Migration history - DO NOT REMOVE
+[[migrations]]
+tag = "v5"
+new_classes = ["MemberCoordinator"]
+
+[[migrations]]
+tag = "v6"
+deleted_classes = ["RunTracker"]
+
+# NEW: Delete MemberCoordinator (unused)
+[[migrations]]
+tag = "v7"
+deleted_classes = ["MemberCoordinator"]
 
 # ===== WORKER LIMITS =====
 [limits]
@@ -91,4 +105,3 @@ max_batch_size = 1
 max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "stats-dlq-local"
-
