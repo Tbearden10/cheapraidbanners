@@ -189,7 +189,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     for (const act of ungroupedActivities) {
       ungroupedByRefId[act.referenceId] = (ungroupedByRefId[act.referenceId] || 0) + 1;
     }
-    console.warn(`[MemberJob] ${ungroupedActivities.length} ungrouped activities:`, ungroupedByRefId);
+    console.warn(`[MemberJob] ${ungroupedActivities.length} ungrouped activities:`);
   }
 
   // Dedupe per dungeon
@@ -372,25 +372,6 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     }
 
     console.log(`[MemberJob] Queued ${batches.length} batch(es) for ${dungeon.displayName} (${activitiesPayload.length} new activities)`);
-  }
-
-  // Initialize MemberCoordinator if we have batches to process
-  const totalBatches = Object.values(dungeonBatchCounts).reduce((sum, count) => sum + count, 0);
-  if (totalBatches > 0) {
-    const coordinatorId = env.MEMBER_COORDINATOR.idFromName(job.membershipId);
-    const coordinator = env.MEMBER_COORDINATOR.get(coordinatorId);
-    
-    await coordinator.fetch('https://internal/init', {
-      method: 'POST',
-      body: JSON.stringify({
-        membershipId: job.membershipId,
-        membershipType: job.membershipType,
-        clanId: job.clanId,
-        totalBatches,
-        dungeonBatches: dungeonBatchCounts
-      }),
-      headers: { 'Content-Type': 'application/json' },
-    });
   }
 
   const duration = Date.now() - startTime;

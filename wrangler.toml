@@ -42,17 +42,6 @@ max_retries = 3
 dead_letter_queue = "stats-dlq"
 max_concurrency = 1
 
-# ===== DURABLE OBJECTS =====
-
-[[durable_objects.bindings]]
-name = "MEMBER_COORDINATOR"
-class_name = "MemberCoordinator"
-
-# ===== DURABLE OBJECT MIGRATIONS =====
-[[migrations]]
-tag = "v5"
-new_classes = ["MemberCoordinator"]
-
 
 # ===== WORKER LIMITS =====
 [limits]
@@ -63,7 +52,6 @@ cpu_ms = 300000
 crons = [
   "0 * * * *",      # Member sync: Every hour at minute 0
   "0 19 * * *",     # Stats sync: Every day at 12 PM MST (19:00 UTC)
-  "0 20 * * *"      # Aggregate recompute: Every day at 1 PM MST (20:00 UTC)
 ]
 
 # ===== ROUTES =====
@@ -104,11 +92,3 @@ max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "stats-dlq-local"
 
-[[env.dev.durable_objects.bindings]]
-name = "MEMBER_COORDINATOR"
-class_name = "MemberCoordinator"
-
-
-[[env.dev.migrations]]
-tag = "v5"
-new_classes = ["MemberCoordinator"]

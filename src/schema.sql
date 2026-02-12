@@ -59,20 +59,3 @@ CREATE INDEX IF NOT EXISTS idx_member_dungeon_stats_member
 
 CREATE INDEX IF NOT EXISTS idx_member_dungeon_stats_dungeon
   ON member_dungeon_stats(clan_id, dungeon_hash);
-
--- Table: clan_aggregate_stats
--- Aggregated sums across members (per-dungeon and an "all" row)
-CREATE TABLE IF NOT EXISTS clan_aggregate_stats (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  clan_id TEXT NOT NULL,
-  dungeon_hash TEXT NOT NULL, -- 'all' for overall aggregation
-  total_clears INTEGER NOT NULL DEFAULT 0,
-  total_full_clears INTEGER NOT NULL DEFAULT 0,
-  total_playtime_seconds INTEGER NOT NULL DEFAULT 0,
-  active_member_count INTEGER NOT NULL DEFAULT 0,
-  last_updated INTEGER NOT NULL DEFAULT (unixepoch()),
-  UNIQUE(clan_id, dungeon_hash)
-);
-
-CREATE INDEX IF NOT EXISTS idx_clan_aggregate_stats_clan
-  ON clan_aggregate_stats(clan_id);
