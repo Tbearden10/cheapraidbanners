@@ -189,7 +189,7 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     for (const act of ungroupedActivities) {
       ungroupedByRefId[act.referenceId] = (ungroupedByRefId[act.referenceId] || 0) + 1;
     }
-    console.warn(`[MemberJob] ${ungroupedActivities.length} ungrouped activities:`);
+    console.warn(`[MemberJob] ${ungroupedActivities.length} ungrouped activities:`, ungroupedByRefId);
   }
 
   // Dedupe per dungeon
@@ -282,61 +282,40 @@ export async function processMemberJob(env: Env, job: MemberJob): Promise<void> 
     const completed = activities.filter(a => a?.values?.completed?.basic?.value === 1);
     if (completed.length === 0) continue;
 
-    // Check DB for previous stats
+    // Check DB for current total to compute delta
     const prevRow = await env.DB.prepare(`
-      SELECT last_processed_date, total_clears
+      SELECT total_clears
       FROM member_dungeon_stats
       WHERE clan_id = ? AND membership_id = ? AND dungeon_hash = ?
     `).bind(job.clanId, job.membershipId, dungeonHash).first();
 
-    let cutoffDate: Date | null = null;
-    if (prevRow && (prevRow as any).last_processed_date) {
-      cutoffDate = new Date((prevRow as any).last_processed_date);
-    } else if (job.lastProcessedDate) {
-      cutoffDate = new Date(job.lastProcessedDate);
-    }
-
     const dbTotalClears = prevRow ? Number((prevRow as any).total_clears ?? 0) : 0;
+    const bungieCount = aggregateTargets[dungeonHash] || 0;
+    const newCount = Math.max(0, bungieCount - dbTotalClears);
 
-    // Skip if fewer completions than DB (data inconsistency)
-    if (completed.length < dbTotalClears) {
-      console.warn(`[MemberJob] ${dungeon.displayName}: Fewer completions than DB (${completed.length} < ${dbTotalClears})`);
-      continue;
+    if (newCount === 0) continue;
+
+    // Assume you have lastProcessedDate from DB
+    const lastProcessedDate = prevRow?.last_processed_date;
+
+    // Filter to completed and >= lastProcessedDate
+    let filtered = completed;
+    if (lastProcessedDate) {
+      const lastDateMs = new Date(lastProcessedDate).getTime();
+      filtered = completed.filter(a => {
+        const periodMs = a.period ? new Date(a.period).getTime() : 0;
+        // Use >= instead of >
+        return periodMs >= lastDateMs;
+      });
     }
 
-    // Sort by period ascending (oldest first) BEFORE filtering
-    completed.sort((a, b) => {
+    // Sort and take the newest N
+    filtered.sort((a, b) => {
       const ta = a.period ? new Date(a.period).getTime() : 0;
       const tb = b.period ? new Date(b.period).getTime() : 0;
       return ta - tb;
     });
-
-    // Determine which activities are new using date-based filtering
-    // This ensures we only process activities that haven't been seen before
-    let newActivities = completed;
-    
-    if (cutoffDate) {
-      // We have a cutoff date - filter to activities AFTER that date
-      // This is the correct approach: after deduplication, filter by date
-      newActivities = completed.filter(a => {
-        try {
-          const actDate = new Date(a.period);
-          return actDate.getTime() > cutoffDate!.getTime();
-        } catch {
-          return true;
-        }
-      });
-    } else if (dbTotalClears > 0) {
-      // No cutoff date but we have a DB count - this shouldn't happen normally
-      // Use count-based as fallback (process activities beyond what's in DB)
-      if (completed.length > dbTotalClears) {
-        const newCount = completed.length - dbTotalClears;
-        newActivities = completed.slice(-newCount);
-      } else {
-        newActivities = [];
-      }
-    }
-    // If no cutoff date and no DB count, this is an initial sync - process all
+    const newActivities = filtered.slice(-newCount);
 
     if (newActivities.length === 0) {
       continue;
