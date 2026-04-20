@@ -105,7 +105,7 @@ function formatDisplayName(member: any): string {
 }
 
 // ============================================================================
-// MEMBER SYNC CRON - Every 30 minutes
+// MEMBER SYNC CRON - Every hour
 // ============================================================================
 export async function memberSyncCron(env: Env): Promise<void> {
   const startTime = Date.now();
@@ -220,36 +220,51 @@ export async function memberSyncCron(env: Env): Promise<void> {
     console.log(`[MemberSync] Inactive marking took ${Date.now() - inactiveStartTime}ms`);
   }
 
-  // Process new members immediately (fire-and-forget)
+  // Queue new members and await completion so sends are not dropped
   if (newMembers.length > 0) {
-      console.log(`[MemberSync] Queuing ${newMembers.length} new members for processing`);
-      
-      // Don't await - fire and forget
-      Promise.all(
-        newMembers.map(async (newMember: { membershipId: any; membershipType: any; }) => {
-          try {
-            const displayName = formatDisplayName(newMember);
-            
-            // Queue the member - coordinator will handle the rest
-            await env.MEMBER_STATS_QUEUE.send({
-              clanId,
-              membershipId: newMember.membershipId,
-              membershipType: newMember.membershipType,
-              displayName,
-              lastProcessedDate: null, // Let the job processor fetch this
-            });
-          } catch (err) {
-            console.warn(`[MemberSync] Failed to queue new member ${newMember.membershipId}:`, err);
-          }
-        })
-      ).catch(err => console.warn('[MemberSync] Error queueing new members:', err));
-      
-      console.log(`[MemberSync] New members queued (processing async)`);
-    }
+    console.log(`[MemberSync] Queuing ${newMembers.length} new members for processing`);
 
-    const duration = Date.now() - startTime;
-    console.log(`[MemberSync] Complete: ${successCount} processed in ${(duration/1000).toFixed(1)}s`);
+    const queueResults = await Promise.allSettled(
+      newMembers.map((newMember: { membershipId: any; membershipType: any }) => {
+        const displayName = formatDisplayName(newMember);
+        return env.MEMBER_STATS_QUEUE.send({
+          clanId,
+          membershipId: newMember.membershipId,
+          membershipType: newMember.membershipType,
+          displayName,
+          lastProcessedDate: null, // Let the job processor fetch this
+        });
+      })
+    );
+
+    let queuedCount = 0;
+    let failedCount = 0;
+
+    queueResults.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        queuedCount++;
+      } else {
+        failedCount++;
+        const failedMember = newMembers[index];
+        console.warn(
+          `[MemberSync] Failed to queue new member ${failedMember.membershipId}:`,
+          result.reason
+        );
+      }
+    });
+
+    if (failedCount > 0) {
+      console.warn(
+        `[MemberSync] Queueing complete with failures: ${queuedCount}/${newMembers.length} queued, ${failedCount} failed`
+      );
+    } else {
+      console.log(`[MemberSync] Successfully queued ${queuedCount} new members`);
+    }
   }
+
+  const duration = Date.now() - startTime;
+  console.log(`[MemberSync] Complete: ${successCount} processed in ${(duration/1000).toFixed(1)}s`);
+}
 
 // ============================================================================
 // STATS SYNC CRON - Every 6 hours
