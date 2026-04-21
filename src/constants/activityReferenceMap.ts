@@ -65,6 +65,7 @@ export const ACTIVITY_REFERENCE_MAP: ActivityReference[] = [
       "943878085",   // Explorer (Matchmade)
       "4046934917",  // Eternity
       "2296818662",  // Master
+      "1801496203",  // Master 
     ],
   },
   {
