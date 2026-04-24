@@ -119,17 +119,39 @@ async function loadRecentActivities() {
 
 // app
 document.addEventListener('DOMContentLoaded', async () => {
-  const statsData = await loadStats();
-  let membersData = [];
-  try {
-    const res = await fetch(window.__utils.API_BASE + '/members');
-    const data = await res.json();
-    membersData = data.members || [];
-    document.getElementById('members-count').textContent = membersData.length ?? '—';
-  } catch {
-    document.getElementById('members-count').textContent = '—';
+  // Fetch stats and members in parallel
+  const [statsData, membersData] = await Promise.all([
+    loadStats(),
+    (async () => {
+      try {
+        const res = await fetch(window.__utils.API_BASE + '/members');
+        const data = await res.json();
+        document.getElementById('members-count').textContent = data.members?.length ?? '—';
+        return data.members || [];
+      } catch {
+        document.getElementById('members-count').textContent = '—';
+        return [];
+      }
+    })()
+  ]);
+
+  // Merge member stats from statsData into membersData
+  let memberStatsMap = {};
+  if (statsData && Array.isArray(statsData.memberStats)) {
+    for (const stat of statsData.memberStats) {
+      if (stat.membershipId) memberStatsMap[stat.membershipId] = stat;
+    }
   }
-  renderMembers(membersData);
+  const mergedMembers = membersData.map(m => {
+    const stats = memberStatsMap[m.membershipId] || {};
+    return {
+      ...m,
+      totalFullClears: stats.totalFullClears ?? 0,
+      totalPlaytimeSeconds: stats.totalPlaytimeSeconds ?? 0
+    };
+  });
+
+  renderMembers(mergedMembers);
   loadRecentActivities();
   document.querySelectorAll('.scroll-reveal').forEach(el => {
     const d = Number(el.getAttribute('data-delay')) || 0;
