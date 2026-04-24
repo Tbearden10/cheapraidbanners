@@ -26,7 +26,7 @@ function formatPlaytime(seconds) {
   const h = Math.floor((seconds % 86400) / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
-  if (d > 0) return `${d}d ${h}h`;
+  if (d > 0) return `${d.toLocaleString()}d ${h}h`;
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
@@ -71,15 +71,26 @@ function renderMembers(members) {
     const rankBadge = idx < 3 ? `<div class="member-stat-rank ${rankClass}">#${idx + 1}</div>` : '';
     return `
       <div class="member-stat-card ${rankClass} fade-in" data-clears="${clears}" data-playtime="${m.totalPlaytimeSeconds ?? 0}">
-        ${rankBadge}
-        <div class="member-stat-emblem">
-          ${emblem ? `<img src="${emblem}" alt="${name} emblem" />` : `<div style="width:100%;height:100%;background:linear-gradient(135deg,#eee,#ddd);"></div>`}
+        <div class="member-stat-inner">
+          <div class="member-stat-left">
+            <div class="member-stat-emblem">
+              ${emblem ? `<img src="${emblem}" alt="${name} emblem" />` : `<div class="member-stat-emblem-fallback"></div>`}
+              ${idx < 3 ? `<div class="member-stat-rank ${rankClass}">#${idx + 1}</div>` : ''}
+            </div>
+          </div>
+          <div class="member-stat-right">
+            <div class="member-stat-name" title="${name}">${name}</div>
+            <div class="member-stat-row">
+              <span class="member-stat-emoji">🍪</span>
+              <span class="member-stat-clears">—</span>
+              <span class="member-stat-sublabel">clears</span>
+            </div>
+            <div class="member-stat-row">
+              <span class="member-stat-emoji">⏱</span>
+              <span class="member-stat-playtime">—</span>
+            </div>
+          </div>
         </div>
-        <div class="member-stat-name" title="${name}">${name}</div>
-        <div class="member-stat-clears">0</div>
-        <div class="member-stat-label">Dungeon Clears</div>
-        <div class="member-stat-playtime">—</div>
-        <div class="member-stat-label">Playtime</div>
       </div>
     `;
   }).join('');
