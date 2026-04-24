@@ -66,17 +66,35 @@ function renderMembers(members) {
     const rankClass = idx === 0 ? 'rank-1' : idx === 1 ? 'rank-2' : idx === 2 ? 'rank-3' : '';
     const rankBadge = idx < 3 ? `<div class="member-stat-rank ${rankClass}">#${idx + 1}</div>` : '';
     return `
-      <div class="member-stat-card ${rankClass}">
+      <div class="member-stat-card ${rankClass} fade-in" data-clears="${clears}">
         ${rankBadge}
         <div class="member-stat-emblem">
           ${emblem ? `<img src="${emblem}" alt="${name} emblem" />` : `<div style="width:100%;height:100%;background:linear-gradient(135deg,#eee,#ddd);"></div>`}
         </div>
         <div class="member-stat-name" title="${name}">${name}</div>
-        <div class="member-stat-clears">${clears}</div>
+        <div class="member-stat-clears">0</div>
         <div class="member-stat-label">Dungeon Clears</div>
       </div>
     `;
   }).join('');
+
+  // Lazy fade-in and animate clears
+  const cards = container.querySelectorAll('.member-stat-card');
+  const observer = new IntersectionObserver((entries, obs) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const card = entry.target;
+        card.classList.add('visible');
+        const clears = Number(card.getAttribute('data-clears')) || 0;
+        const clearsEl = card.querySelector('.member-stat-clears');
+        if (clearsEl) {
+          window.animateCounter(clearsEl, clears, 1600);
+        }
+        obs.unobserve(card);
+      }
+    });
+  }, { threshold: 0.2 });
+  cards.forEach(card => observer.observe(card));
 }
 
 // activities
@@ -119,7 +137,6 @@ async function loadRecentActivities() {
 
 // app
 document.addEventListener('DOMContentLoaded', async () => {
-  // Fetch stats and members in parallel
   const [statsData, membersData] = await Promise.all([
     loadStats(),
     (async () => {
@@ -135,7 +152,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     })()
   ]);
 
-  // Merge member stats from statsData into membersData
   let memberStatsMap = {};
   if (statsData && Array.isArray(statsData.memberStats)) {
     for (const stat of statsData.memberStats) {
@@ -150,6 +166,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       totalPlaytimeSeconds: stats.totalPlaytimeSeconds ?? 0
     };
   });
+
+  // Sort by clears descending
+  mergedMembers.sort((a, b) => (b.totalFullClears ?? 0) - (a.totalFullClears ?? 0));
 
   renderMembers(mergedMembers);
   loadRecentActivities();
