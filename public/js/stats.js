@@ -23,69 +23,30 @@ function getApiBase() {
 function normalizeStatsResponse(resp) {
   if (!resp) return null;
 
-  console.log('[Stats] Normalizing response:', resp);
-
-  // 1) Get totals from aggregateStats where dungeon_hash === 'all'
+  // 1) Get totals from clanStats
   let totalFull = 0;
   let totalPlay = 0;
-  
-  if (Array.isArray(resp.aggregateStats) && resp.aggregateStats.length > 0) {
-    const allRow = resp.aggregateStats.find(r => String(r.dungeon_hash) === 'all');
-    if (allRow) {
-      totalFull = Number(allRow.total_full_clears || 0);
-      totalPlay = Number(allRow.total_playtime_seconds || 0);
-      console.log('[Stats] Found "all" aggregate:', { totalFull, totalPlay });
-    } else {
-      // Sum all dungeons if no "all" row
-      for (const r of resp.aggregateStats) {
-        if (r.dungeon_hash !== 'all') {
-          totalFull += Number(r.total_full_clears || 0);
-          totalPlay += Number(r.total_playtime_seconds || 0);
-        }
-      }
-      console.log('[Stats] Summed from individual dungeons:', { totalFull, totalPlay });
-    }
+  if (resp.clanStats) {
+    totalFull = Number(resp.clanStats.totalFullClears || 0);
+    totalPlay = Number(resp.clanStats.totalPlaytimeSeconds || 0);
   }
 
-  // 2) Build per-member stats from members array
+  // 2) Build per-member stats from memberStats array
   const perMember = [];
-  
-  if (Array.isArray(resp.members) && resp.members.length > 0) {
-    for (const m of resp.members) {
+  if (Array.isArray(resp.memberStats) && resp.memberStats.length > 0) {
+    for (const m of resp.memberStats) {
       const membershipId = String(m.membershipId || '');
       if (!membershipId) continue;
-
-      let memberFull = 0;
-      let memberPlay = 0;
-      const statsArr = Array.isArray(m.stats) ? m.stats : [];
-
-      // Sum up member's stats across all dungeons
-      for (const s of statsArr) {
-        memberFull += Number(s.totalFullClears || 0);
-        memberPlay += Number(s.totalPlaytimeSeconds || 0);
-      }
-
       perMember.push({
         membershipId,
-        totalFullClears: memberFull,
-        totalPlaytimeSeconds: memberPlay,
-        stats: statsArr, // Keep full stats array
-        lastProcessedDate: m.lastProcessedDate || null
+        displayName: m.displayName || '',
+        totalFullClears: Number(m.totalFullClears || 0),
+        totalPlaytimeSeconds: Number(m.totalPlaytimeSeconds || 0),
       });
     }
   }
 
-  console.log('[Stats] Normalized:', {
-    dungeonClears: totalFull,
-    totalPlaytimeSeconds: totalPlay,
-    perMemberCount: perMember.length
-  });
-
-  if (perMember.length > 0) {
-    console.log('[Stats] First member sample:', perMember[0]);
-  }
-
-  const memberCount = Number(resp.memberCount || perMember.length);
+  const memberCount = perMember.length;
   const fetchedAt = resp.fetchedAt || new Date().toISOString();
 
   return {
@@ -93,7 +54,7 @@ function normalizeStatsResponse(resp) {
     totalPlaytimeSeconds: totalPlay,
     perMember,
     memberCount,
-    fetchedAt
+    lastUpdated: fetchedAt,
   };
 }
 

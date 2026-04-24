@@ -100,6 +100,34 @@ export async function getMemberStats(
 }
 
 /**
+ * Get total full clears and playtime per member (fast, no breakdown)
+ */
+export async function getAllMembersTotals(
+  db: D1Database,
+  clanId: string
+): Promise<Array<{ membershipId: string; displayName: string; totalFullClears: number; totalPlaytimeSeconds: number }>> {
+  const result = await db.prepare(`
+    SELECT
+      mds.membership_id AS membershipId,
+      cm.display_name AS displayName,
+      COALESCE(SUM(mds.total_full_clears), 0) AS totalFullClears,
+      COALESCE(SUM(mds.total_playtime_seconds), 0) AS totalPlaytimeSeconds
+    FROM member_dungeon_stats mds
+    JOIN clan_members cm
+      ON mds.clan_id = cm.clan_id AND mds.membership_id = cm.membership_id
+    WHERE mds.clan_id = ? AND cm.is_active = 1
+    GROUP BY mds.membership_id, cm.display_name
+  `).bind(clanId).all();
+
+  return (result.results || []).map((row: any) => ({
+    membershipId: row.membershipId,
+    displayName: row.displayName,
+    totalFullClears: Number(row.totalFullClears || 0),
+    totalPlaytimeSeconds: Number(row.totalPlaytimeSeconds || 0),
+  }));
+}
+
+/**
  * Upsert member dungeon stats with dual clear tracking
  * IMPORTANT: Now accepts both totalClears and totalFullClears and persists last_processed_instance_id
  */

@@ -9,7 +9,7 @@ import {
   fetchPGCR,
   fetchActivityDefinition,
 } from './api/bungieApi';
-import { getClanAggregateStats, getMembersList, getMemberStats, upsertClanMember } from './db/queries';
+import { getClanAggregateStats, getMembersList, getAllMembersTotals, upsertClanMember } from './db/queries';
 import { processMemberJob } from './processors/memberJobProcessor';
 import { processStatsQueueJob } from './processors/statsQueueProcessor';
 
@@ -134,8 +134,15 @@ export async function memberSyncCron(env: Env): Promise<void> {
   const newMembers = roster.filter((m: any) => !dbMemberIds.has(m.membershipId));
   const leftMembers = dbMembers.filter(m => !rosterMemberIds.has(m.membership_id));
 
-  if (newMembers.length > 0 || leftMembers.length > 0) {
-    console.log(`[MemberSync] Changes: ${newMembers.length} new, ${leftMembers.length} left`);
+  // --- ADD: Detect rejoined members ---
+  const rejoinedMembers = dbMembers.filter(m =>
+    !newMembers.find((nm: any) => nm.membershipId === m.membership_id) && // not already new
+    rosterMemberIds.has(m.membership_id) &&                        // in current roster
+    m.is_active === 0                                              // was inactive
+  );
+
+  if (newMembers.length > 0 || leftMembers.length > 0 || rejoinedMembers.length > 0) {
+    console.log(`[MemberSync] Changes: ${newMembers.length} new, ${leftMembers.length} left, ${rejoinedMembers.length} rejoined`);
   }
 
   // Parallel emblem enrichment with concurrency limit
@@ -218,6 +225,30 @@ export async function memberSyncCron(env: Env): Promise<void> {
       } catch {}
     }
     console.log(`[MemberSync] Inactive marking took ${Date.now() - inactiveStartTime}ms`);
+  }
+  
+  // Mark rejoined members
+  if (rejoinedMembers.length > 0) {
+    console.log(`[MemberSync] Marking ${rejoinedMembers.length} rejoined members as active and queueing for stats`);
+    for (const member of rejoinedMembers) {
+      try {
+        // Mark as active
+        await env.DB.prepare(
+          `UPDATE clan_members SET is_active = 1, updated_at = ? WHERE clan_id = ? AND membership_id = ?`
+        ).bind(Date.now(), clanId, member.membership_id).run();
+
+        // Queue for stats processing
+        await env.MEMBER_STATS_QUEUE.send({
+          clanId,
+          membershipId: member.membership_id,
+          membershipType: member.membership_type,
+          displayName: member.display_name,
+          lastProcessedDate: null,
+        });
+      } catch (err) {
+        console.error(`[MemberSync] Failed to process rejoined member ${member.display_name}:`, err);
+      }
+    }
   }
 
   // Queue new members and await completion so sends are not dropped
@@ -491,31 +522,21 @@ export default {
       if (url.pathname === '/stats' && request.method === 'GET') {
         try {
           const clanId = env.BUNGIE_CLAN_ID;
-          
-          // Get members
-          const members = await getMembersList(env.DB, clanId, true); // active only
-          
-          // Get aggregate stats (direct aggregation)
-          const aggregates = await getClanAggregateStats(env.DB, clanId);
-          
-          // Get member stats
-          const membersWithStats = [];
-          for (const member of members) {
-            const stats = await getMemberStats(env.DB, clanId, member.membership_id);
-            membersWithStats.push({
-              membershipId: member.membership_id,
-              displayName: member.display_name,
-              stats: stats.map(s => ({
-                dungeonHash: s.dungeon_hash,
-                totalClears: s.total_clears,
-                totalFullClears: s.total_full_clears,
-                totalPlaytimeSeconds: s.total_playtime_seconds,
-                lastProcessedDate: s.last_processed_date,
-              })),
-            });
-          }
 
-          // --- FIX: Get the latest updated_at from member_dungeon_stats ---
+          // Get per-member totals in one fast query
+          const memberStats = await getAllMembersTotals(env.DB, clanId);
+
+          // Aggregate for clan totals
+          const clanStats = memberStats.reduce(
+            (acc, m) => {
+              acc.totalFullClears += m.totalFullClears;
+              acc.totalPlaytimeSeconds += m.totalPlaytimeSeconds;
+              return acc;
+            },
+            { totalFullClears: 0, totalPlaytimeSeconds: 0 }
+          );
+
+          // Last updated
           const updatedRow = await env.DB.prepare(
             `SELECT MAX(updated_at) as last_updated FROM member_dungeon_stats WHERE clan_id = ?`
           ).bind(clanId).first();
@@ -524,27 +545,9 @@ export default {
             : new Date().toISOString();
 
           return jsonResponse({
-            members: membersWithStats,
-            aggregateStats: [
-              // Per-dungeon stats
-              ...aggregates.perDungeon.map(d => ({
-                dungeon_hash: d.dungeonHash,
-                total_clears: d.totalClears,
-                total_full_clears: d.totalFullClears,
-                total_playtime_seconds: d.totalPlaytimeSeconds,
-                active_member_count: d.activeMemberCount,
-              })),
-              // Overall stats as 'all'
-              {
-                dungeon_hash: 'all',
-                total_clears: aggregates.overall.totalClears,
-                total_full_clears: aggregates.overall.totalFullClears,
-                total_playtime_seconds: aggregates.overall.totalPlaytimeSeconds,
-                active_member_count: aggregates.overall.activeMemberCount,
-              }
-            ],
-            memberCount: members.length,
-            fetchedAt: lastUpdated,
+            clanStats,
+            memberStats,
+            lastUpdated: lastUpdated,
           }, 200, request, env);
         } catch (err) {
           console.error('[Stats] Error:', err);
