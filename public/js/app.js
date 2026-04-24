@@ -56,7 +56,6 @@ async function updateMembers(forceRender = false) {
           : (countEl.textContent = String(membersData.memberCount));
       }
       if (currentStatsData) renderCurrentView();
-      console.log('[App] Members updated');
     }
   } catch (err) {
     console.error('[App] updateMembers error', err);
@@ -75,7 +74,6 @@ async function updateStats(forceRender = false) {
       currentStatsData = statsData;
       updateStatsBar(statsData, oldStats);
       if (currentMembersData) renderCurrentView();
-      console.log('[App] Stats updated');
     }
   } catch (err) {
     console.error('[App] updateStats error', err);
@@ -145,7 +143,6 @@ function setupViewToggles() {
 document.addEventListener('DOMContentLoaded', () => {
   try {
     new SimpleReveal();
-    console.log('[App] SimpleReveal initialized');
   } catch (err) {
     console.warn('[App] SimpleReveal init failed', err);
     Array.from(document.querySelectorAll('.scroll-reveal')).forEach(el => el.classList.add('visible'));
@@ -156,5 +153,4 @@ document.addEventListener('DOMContentLoaded', () => {
     console.warn('[App] setupViewToggles failed', err);
   }
   updateAll(true).catch((e) => console.error('[App] initial updateAll failed', e));
-  console.log('[App] Frontend initialized - data will only refresh on page reload');
 });

@@ -142,8 +142,4 @@
   };
 
   // Also expose directly on window for backward compatibility
-  window.API_BASE = API_BASE;
-  
-  const envLabel = isLocalDevelopment() ? '🔧 LOCAL DEV' : '🌐 PRODUCTION';
-  console.log(`[Utils] ${envLabel} - API_BASE:`, API_BASE);
 })();

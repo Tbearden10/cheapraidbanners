@@ -11,14 +11,12 @@ window.showPGCRModal = async function(instanceId) {
 
   // Check if data is already cached
   if (pgcrCache[instanceId]) {
-    console.log(`[PGCR] Using cached data for instanceId: ${instanceId}`);
     renderPGCRContent(contentEl, pgcrCache[instanceId]);
     return;
   }
 
   // Fetch data if not in cache
   try {
-    console.log(`[PGCR] Fetching data for instanceId: ${instanceId}`);
     const fetchJsonFn = (path, opts) => {
       const base = (window.__utils?.API_BASE || window.API_BASE || 'https://api.cheapraidbanners.com').replace(/\/$/, '');
       const url = new URL(path, base).toString();
@@ -34,7 +32,6 @@ window.showPGCRModal = async function(instanceId) {
 
     // Cache the data
     pgcrCache[instanceId] = data;
-    console.log(`[PGCR] Data cached for instanceId: ${instanceId}`);
 
     renderPGCRContent(contentEl, data);
   } catch (error) {
