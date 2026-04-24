@@ -23,7 +23,6 @@ class SimpleReveal {
 }
 
 // --- App logic ---
-let currentView = 'cards';
 let currentMembersData = null;
 let currentStatsData = null;
 let updating = { members: false, stats: false };
@@ -37,7 +36,7 @@ async function updateAll(forceRender = false) {
     try {
       if (typeof loadRecentActivities === 'function') await loadRecentActivities();
     } catch (err) {
-      console.warn('[App] loadRecentActivities failed', err);
+      console.error('[App] loadRecentActivities failed', err);
     }
   }
 }
@@ -55,7 +54,9 @@ async function updateMembers(forceRender = false) {
           ? window.__utils.animateCounter(countEl, membersData.memberCount)
           : (countEl.textContent = String(membersData.memberCount));
       }
-      if (currentStatsData) renderCurrentView();
+      if (currentStatsData && typeof renderMemberStats === 'function') {
+        renderMemberStats(currentStatsData, currentMembersData);
+      }
     }
   } catch (err) {
     console.error('[App] updateMembers error', err);
@@ -73,7 +74,9 @@ async function updateStats(forceRender = false) {
       const oldStats = currentStatsData;
       currentStatsData = statsData;
       updateStatsBar(statsData, oldStats);
-      if (currentMembersData) renderCurrentView();
+      if (currentMembersData && typeof renderMemberStats === 'function') {
+        renderMemberStats(currentStatsData, currentMembersData);
+      }
     }
   } catch (err) {
     console.error('[App] updateStats error', err);
@@ -107,50 +110,16 @@ function updateStatsBar(newStats, oldStats) {
     }, 1250);
   }
 
-  // CHANGED: Use lastUpdated instead of fetchedAt
   if (updatedEl && newStats.lastUpdated) {
     updatedEl.textContent = new Date(newStats.lastUpdated).toLocaleString();
   }
-}
-
-function renderCurrentView() {
-  if (!currentMembersData || !currentStatsData) return;
-  if (currentView === 'bars') {
-    if (typeof renderMemberStatsBars === 'function') {
-      renderMemberStatsBars(currentStatsData, currentMembersData);
-    }
-  } else {
-    if (typeof renderMemberStats === 'function') {
-      renderMemberStats(currentStatsData, currentMembersData);
-    }
-  }
-}
-
-function setupViewToggles() {
-  const toggleButtons = document.querySelectorAll('.viz-toggle');
-  toggleButtons.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const view = btn.getAttribute('data-view');
-      if (currentView === view) return;
-      currentView = view;
-      toggleButtons.forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-      renderCurrentView();
-    });
-  });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   try {
     new SimpleReveal();
   } catch (err) {
-    console.warn('[App] SimpleReveal init failed', err);
     Array.from(document.querySelectorAll('.scroll-reveal')).forEach(el => el.classList.add('visible'));
-  }
-  try {
-    setupViewToggles();
-  } catch (err) {
-    console.warn('[App] setupViewToggles failed', err);
   }
   updateAll(true).catch((e) => console.error('[App] initial updateAll failed', e));
 });

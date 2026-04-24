@@ -132,7 +132,6 @@ async function loadMembers(forceRender = false) {
     const data = await fetchJson('/members');
 
     if (!data || !Array.isArray(data.members) || data.members.length === 0) {
-      console.warn('[Members] /members returned no data');
       // Populate map empty and return null to let app handle it
       window.__membersById.clear();
       return null;
