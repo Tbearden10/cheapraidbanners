@@ -28,11 +28,6 @@
     return false;
   }
 
-  /**
-   * Get API base URL based on environment
-   * - Local dev: Use same origin (no separate API subdomain)
-   * - Production: Use api.cheapraidbanners.com
-   */
   function getApiBase() {
     if (isLocalDevelopment()) {
       // In local dev, backend and frontend are on same origin

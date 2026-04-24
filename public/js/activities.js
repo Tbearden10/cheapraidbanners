@@ -3,7 +3,7 @@ async function loadRecentActivities() {
   if (!container) return;
   container.innerHTML = '<div style="color: var(--chocolate); text-align:center; padding:40px;">Loading recent activities...</div>';
   try {
-    const res = await fetch('/recent-activities');
+    const res = await fetch(window.__utils.API_BASE + '/recent-activities');
     const activities = await res.json();
     if (!Array.isArray(activities) || activities.length === 0) {
       container.innerHTML = '<div style="color: var(--chocolate); text-align:center; padding:40px;">No recent activities found.</div>';

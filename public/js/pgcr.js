@@ -19,7 +19,7 @@ window.showPGCRModal = async function(instanceId) {
     return;
   }
   try {
-    const res = await fetch(`/pgcr?instanceId=${encodeURIComponent(instanceId)}`);
+    const res = await fetch(window.__utils.API_BASE + `/pgcr?instanceId=${encodeURIComponent(instanceId)}`);
     const data = await res.json();
     if (!data || data.error) {
       contentEl.innerHTML = `<div style="text-align: center; padding: 40px; color: #dc143c;">Failed to load activity: ${data?.error || 'Unknown error'}</div>`;
