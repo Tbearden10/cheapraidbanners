@@ -515,6 +515,14 @@ export default {
             });
           }
 
+          // --- FIX: Get the latest updated_at from member_dungeon_stats ---
+          const updatedRow = await env.DB.prepare(
+            `SELECT MAX(updated_at) as last_updated FROM member_dungeon_stats WHERE clan_id = ?`
+          ).bind(clanId).first();
+          const lastUpdated = updatedRow && updatedRow.last_updated
+            ? new Date(Number(updatedRow.last_updated)).toISOString()
+            : new Date().toISOString();
+
           return jsonResponse({
             members: membersWithStats,
             aggregateStats: [
@@ -536,7 +544,7 @@ export default {
               }
             ],
             memberCount: members.length,
-            fetchedAt: new Date().toISOString(),
+            fetchedAt: lastUpdated,
           }, 200, request, env);
         } catch (err) {
           console.error('[Stats] Error:', err);
