@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "esbuild public/js/*.js --bundle --minify --outfile=public/js/bundle.js",
+    "build": "esbuild public/js/main.js --bundle --minify --outfile=public/js/bundle.js",
     "dev": "wrangler dev --local --assets ./public --env dev"
   },
   "devDependencies": {
