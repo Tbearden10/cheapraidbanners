@@ -12,7 +12,6 @@
   <link rel="shortcut icon" href="/assets/cookie.ico" />
 </head>
 <body>
-  <!-- Background image (scene) with cookie images falling over it -->
   <div class="cookie-background" aria-hidden="true">
     <div class="cookie"></div>
     <div class="cookie"></div>
@@ -30,24 +29,20 @@
     <div class="cookie"></div>
     <div class="cookie"></div>
   </div>
-
-  <!-- Sticky header with join button -->
   <header class="sticky-header">
     <div class="container header-inner">
       <div class="site-title">cheapraidbanners.com <span class="callsign">[flag]</span></div>
       <a id="request-cta" class="cta-button" href="https://www.bungie.net/en/ClanV2?groupid=5335552" target="_blank" rel="noopener noreferrer">
-        Request to join
+        View on Bungie.net
       </a>
     </div>
   </header>
 
   <main class="container">
-    <!-- Hero -->
     <section class="hero scroll-reveal" data-delay="60">
       <div class="hero-inner">
         <div class="banner-vertical">
           <div class="banner">
-            <!-- clan banner image (keeps aspect ratio) -->
             <img id="clan-banner" src="/assets/banner.png" alt="Clan banner" />
           </div>
         </div>
@@ -60,18 +55,13 @@
       </div>
     </section>
 
-    <!-- About + Stats -->
     <section class="about-stats">
       <div class="about scroll-reveal" data-delay="120">
         <p>
           We have the cheapest raid banners around. Join the clan for exclusive banners, weekly events, or if you just like cookies!
         </p>
       </div>
-
-      <!-- NEW: Compact Stats Bar + Gallery Layout -->
       <div class="stats-and-gallery-layout scroll-reveal" data-delay="180">
-        
-        <!-- Compact Stats Bar -->
         <div class="compact-stats-bar">
           <div class="compact-stat">
             <div class="compact-stat-value" id="members-count">—</div>
@@ -100,8 +90,6 @@
         <span class="updated-value" id="last-updated">never</span>
       </div>
     </section>
-
-    <!-- Recent Activities -->
     <section class="recent-activities scroll-reveal" data-delay="240">
       <h2 class="section-title">RECENT ACTIVITIES</h2>
       <div class="recent-activities-container">
@@ -111,11 +99,10 @@
       </div>
     </section>
 
-    <!-- Members -->
+
     <section class="members-section">
       <h2 class="section-title scroll-reveal" data-delay="400">MEMBERS</h2>
 
-      <!-- Member Stats Visualization -->
       <div class="member-stats-viz scroll-reveal" data-delay="420">
         <div class="viz-header">
         </div>
@@ -125,13 +112,6 @@
       </div>
     </section>
   </main>
-
-  <!-- Load JavaScript files in order -->
-  <script src="js/utils.js"></script>
-  <script src="js/pgcr.js"></script>
-  <script src="js/members.js"></script>
-  <script src="js/stats.js"></script>
-  <script src="js/activities.js"></script>
-  <script src="js/app.js"></script>
+  <script src="js/bundle.js"></script>
 </body>
 </html>

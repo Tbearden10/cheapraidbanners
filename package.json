@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "echo 'Frontend is static' && exit 0",
+    "build": "esbuild public/js/*.js --bundle --minify --outfile=public/js/bundle.js",
     "dev": "wrangler dev --local --assets ./public --env dev"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251125.0",
+    "esbuild": "^0.28.0",
     "miniflare": "^4.0.0",
     "wrangler": "^4.0.0"
   },
