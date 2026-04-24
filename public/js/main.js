@@ -1,25 +1,35 @@
 // utils
+window.nf = new Intl.NumberFormat();
+
 window.animateCounter = function(el, target, duration = 1200) {
   if (!el) return;
   target = Number(target) || 0;
   const start = Number((el.textContent || '').replace(/[^\d]/g, '')) || 0;
-  if (start === target) return;
+  if (start === target) {
+    el.textContent = window.nf.format(target);
+    return;
+  }
   const startTime = performance.now();
   function step(now) {
     const progress = Math.min(1, (now - startTime) / duration);
     const value = Math.round(start + (target - start) * progress);
-    el.textContent = value;
+    el.textContent = window.nf.format(value);
     if (progress < 1) requestAnimationFrame(step);
   }
   requestAnimationFrame(step);
 };
 window.__utils = { API_BASE: "https://api.cheapraidbanners.com" };
 
-function formatDuration(seconds) {
-  if (!seconds || seconds <= 0) return '0s';
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+function formatPlaytime(seconds) {
+  seconds = Math.floor(seconds || 0);
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 // stats
@@ -28,18 +38,12 @@ async function loadStats() {
     const res = await fetch(window.__utils.API_BASE + '/stats');
     const data = await res.json();
     const dungeonEl = document.getElementById('dungeon-count');
-    const playtimeEl = document.getElementById('playtime');
     if (dungeonEl && typeof data.clanStats?.totalFullClears !== 'undefined') {
       window.animateCounter(dungeonEl, data.clanStats.totalFullClears);
     }
+    const playtimeEl = document.getElementById('playtime');
     if (playtimeEl && typeof data.clanStats?.totalPlaytimeSeconds !== 'undefined') {
-      const hours = Math.floor(data.clanStats.totalPlaytimeSeconds / 3600);
-      window.animateCounter(playtimeEl, hours);
-      setTimeout(() => {
-        if (playtimeEl.textContent && !playtimeEl.textContent.includes('h')) {
-          playtimeEl.textContent += 'h';
-        }
-      }, 1250);
+      playtimeEl.textContent = formatPlaytime(data.clanStats.totalPlaytimeSeconds);
     }
     document.getElementById('last-updated').textContent = new Date(data.lastUpdated).toLocaleString();
     return data;
@@ -66,7 +70,7 @@ function renderMembers(members) {
     const rankClass = idx === 0 ? 'rank-1' : idx === 1 ? 'rank-2' : idx === 2 ? 'rank-3' : '';
     const rankBadge = idx < 3 ? `<div class="member-stat-rank ${rankClass}">#${idx + 1}</div>` : '';
     return `
-      <div class="member-stat-card ${rankClass} fade-in" data-clears="${clears}">
+      <div class="member-stat-card ${rankClass} fade-in" data-clears="${clears}" data-playtime="${m.totalPlaytimeSeconds ?? 0}">
         ${rankBadge}
         <div class="member-stat-emblem">
           ${emblem ? `<img src="${emblem}" alt="${name} emblem" />` : `<div style="width:100%;height:100%;background:linear-gradient(135deg,#eee,#ddd);"></div>`}
@@ -74,6 +78,8 @@ function renderMembers(members) {
         <div class="member-stat-name" title="${name}">${name}</div>
         <div class="member-stat-clears">0</div>
         <div class="member-stat-label">Dungeon Clears</div>
+        <div class="member-stat-playtime">—</div>
+        <div class="member-stat-label">Playtime</div>
       </div>
     `;
   }).join('');
@@ -89,6 +95,11 @@ function renderMembers(members) {
         const clearsEl = card.querySelector('.member-stat-clears');
         if (clearsEl) {
           window.animateCounter(clearsEl, clears, 1600);
+        }
+        const playtime = Number(card.getAttribute('data-playtime')) || 0;
+        const playtimeEl = card.querySelector('.member-stat-playtime');
+        if (playtimeEl) {
+          playtimeEl.textContent = formatPlaytime(playtime);
         }
         obs.unobserve(card);
       }
