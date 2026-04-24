@@ -140,17 +140,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   const [statsData, membersData] = await Promise.all([
     loadStats(),
     (async () => {
-      try {
+        try {
         const res = await fetch(window.__utils.API_BASE + '/members');
         const data = await res.json();
-        document.getElementById('members-count').textContent = data.members?.length ?? '—';
+        const countEl = document.getElementById('members-count');
+        if (countEl) window.animateCounter(countEl, data.members?.length ?? 0, 1200);
         return data.members || [];
-      } catch {
+        } catch {
         document.getElementById('members-count').textContent = '—';
         return [];
-      }
+        }
     })()
-  ]);
+    ]);
 
   let memberStatsMap = {};
   if (statsData && Array.isArray(statsData.memberStats)) {
