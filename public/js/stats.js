@@ -106,8 +106,8 @@ function renderStatsLocal(data, forceRender = false) {
     }, 1250);
   }
 
-  if (updatedEl && data.fetchedAt) {
-    const newText = new Date(data.fetchedAt).toLocaleString();
+  if (updatedEl && data.lastUpdated) {
+    const newText = new Date(data.lastUpdated).toLocaleString();
     if (updatedEl.textContent !== newText) {
       updatedEl.textContent = newText;
     }
