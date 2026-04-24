@@ -514,6 +514,9 @@ body {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 16px;
+  scroll-behavior: smooth;
+  transition: opacity 0.4s;
+  opacity: 1;
 }
 
 .member-stat-card {
@@ -657,6 +660,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.member-stats-container.loading {
+  opacity: 0.5;
 }
 
 .member-stat-bar {
