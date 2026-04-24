@@ -47,14 +47,14 @@ function normalizeStatsResponse(resp) {
   }
 
   const memberCount = perMember.length;
-  const fetchedAt = resp.fetchedAt || new Date().toISOString();
+  const lastUpdated = resp.lastUpdated || new Date().toISOString();
 
   return {
     dungeonClears: totalFull,
     totalPlaytimeSeconds: totalPlay,
     perMember,
     memberCount,
-    lastUpdated: fetchedAt,
+    lastUpdated,
   };
 }
 

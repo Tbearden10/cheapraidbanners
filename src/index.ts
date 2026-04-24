@@ -547,7 +547,7 @@ export default {
           return jsonResponse({
             clanStats,
             memberStats,
-            lastUpdated: lastUpdated,
+            lastUpdated,
           }, 200, request, env);
         } catch (err) {
           console.error('[Stats] Error:', err);
