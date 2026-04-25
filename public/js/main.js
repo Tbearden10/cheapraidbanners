@@ -146,8 +146,7 @@ async function loadRecentActivities() {
       return `
         <div class="gallery-item" style="${styleAttr}">
           <div class="gallery-item-overlay always-visible">
-            <div class="gallery-item-time">${duration}</div>
-            <div class="gallery-item-badge ${badgeClass}"></div>
+            <div class="gallery-item-badge ${badgeClass}">${duration}</div>
           </div>
         </div>
       `;
