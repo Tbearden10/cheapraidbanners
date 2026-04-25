@@ -468,35 +468,32 @@ body {
 /* Stats box */
 .member-stat-stats {
   display: flex;
-  align-items: center;
-  gap: 0;
   background: rgba(92, 64, 51, 0.08);
   border: 1.5px solid rgba(92, 64, 51, 0.18);
   border-radius: 8px;
   overflow: hidden;
 }
+
 .member-stat-stat {
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 8px 10px;
-  gap: 2px;
+  padding: 10px;
+  text-align: center;
 }
+
 .member-stat-stat-divider {
   width: 1.5px;
-  align-self: stretch;
   background: rgba(92, 64, 51, 0.2);
 }
+
 .member-stat-clears,
 .member-stat-playtime {
-  font-size: clamp(14px, 4vw, 22px);
+  font-size: clamp(14px, 5.5vw, 24px);
   font-weight: 900;
   color: var(--chocolate-chip);
   line-height: 1;
-  text-align: center;
   white-space: nowrap;
 }
+
 .member-stat-stat-label {
   font-size: 9px;
   font-weight: 900;
