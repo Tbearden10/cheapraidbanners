@@ -450,17 +450,7 @@ body {
   min-width: 0;
   line-height: 1.2;
 }
-.member-stat-role-icon {
-  width: 15px;
-  height: 15px;
-  flex-shrink: 0;
-  stroke-width: 2.2px;
-}
-.member-stat-role-icon.role-founder        { color: var(--role-founder); }
-.member-stat-role-icon.role-acting-founder { color: var(--role-acting-founder); }
-.member-stat-role-icon.role-admin          { color: var(--role-admin); }
-.member-stat-role-icon.role-member         { color: var(--role-member); }
-.member-stat-role-icon.role-beginner       { color: var(--role-beginner); }
+
 .member-stat-rank {
   position: absolute;
   top: 10px;

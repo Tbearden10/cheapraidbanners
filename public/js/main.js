@@ -32,16 +32,6 @@ function formatPlaytime(seconds) {
   return `${s}s`;
 }
 
-const ROLE_MAP = {
-  5: { icon: 'crown',  cls: 'role-founder' },
-  3: { icon: 'shield', cls: 'role-admin' },
-};
-function roleTag(memberType) {
-  const role = ROLE_MAP[memberType];
-  if (!role) return '';
-  return `<i data-lucide="${role.icon}" class="member-stat-role-icon ${role.cls}"></i>`;
-}
-
 // stats
 async function loadStats() {
   try {
@@ -89,7 +79,6 @@ function renderMembers(members) {
           <div class="member-stat-right">
             <div class="member-stat-header">
               <div class="member-stat-name" title="${name}">${name}</div>
-              ${roleTag(m.memberType)}
             </div>
             <div class="member-stat-stats">
               <div class="member-stat-stat">
@@ -207,7 +196,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   mergedMembers.sort((a, b) => (b.totalFullClears ?? 0) - (a.totalFullClears ?? 0));
 
   renderMembers(mergedMembers);
-  if (window.lucide) lucide.createIcons();
   loadRecentActivities();
   document.querySelectorAll('.scroll-reveal').forEach(el => {
     const d = Number(el.getAttribute('data-delay')) || 0;
