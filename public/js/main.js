@@ -72,22 +72,24 @@ function renderMembers(members) {
     return `
       <div class="member-stat-card ${rankClass} fade-in" data-clears="${clears}" data-playtime="${m.totalPlaytimeSeconds ?? 0}">
         <div class="member-stat-inner">
-          <div class="member-stat-left">
-            <div class="member-stat-emblem">
-              ${emblem ? `<img src="${emblem}" alt="${name} emblem" />` : `<div class="member-stat-emblem-fallback"></div>`}
-              ${idx < 3 ? `<div class="member-stat-rank ${rankClass}">#${idx + 1}</div>` : ''}
-            </div>
+          <div class="member-stat-emblem">
+            ${emblem ? `<img src="${emblem}" alt="${name} emblem" />` : `<div class="member-stat-emblem-fallback"></div>`}
           </div>
           <div class="member-stat-right">
-            <div class="member-stat-name" title="${name}">${name}</div>
-            <div class="member-stat-row">
-              <span class="member-stat-emoji">🍪</span>
-              <span class="member-stat-clears">—</span>
-              <span class="member-stat-sublabel">clears</span>
+            <div class="member-stat-header">
+              <div class="member-stat-name" title="${name}">${name}</div>
+              ${idx < 3 ? `<div class="member-stat-rank ${rankClass}">#${idx + 1}</div>` : ''}
             </div>
-            <div class="member-stat-row">
-              <span class="member-stat-emoji">⏱</span>
-              <span class="member-stat-playtime">—</span>
+            <div class="member-stat-stats">
+              <div class="member-stat-stat">
+                <div class="member-stat-clears">—</div>
+                <div class="member-stat-stat-label">CLEARS</div>
+              </div>
+              <div class="member-stat-stat-divider"></div>
+              <div class="member-stat-stat">
+                <div class="member-stat-playtime">—</div>
+                <div class="member-stat-stat-label">⏱ TIME</div>
+              </div>
             </div>
           </div>
         </div>
