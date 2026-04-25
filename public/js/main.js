@@ -137,7 +137,7 @@ async function loadRecentActivities() {
       return;
     }
     container.innerHTML = activities.map(act => {
-      const duration = formatDuration(act.duration);
+      const duration = formatPlaytime(act.duration);
       const badgeClass = act.completed ? 'clear-success' : 'clear-fail';
       const badgeText = act.completed ? '✓' : '✗';
       const imageUrl = act.image || '';
