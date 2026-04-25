@@ -102,7 +102,11 @@ function renderMembers(members) {
   const observer = new IntersectionObserver((entries, obs) => {
     const intersecting = entries
       .filter(e => e.isIntersecting)
-      .sort((a, b) => a.boundingClientRect.left - b.boundingClientRect.left);
+      .sort((a, b) => {
+        const topDiff = a.boundingClientRect.top - b.boundingClientRect.top;
+        if (Math.abs(topDiff) > 10) return topDiff;
+        return a.boundingClientRect.left - b.boundingClientRect.left;
+      });
 
     intersecting.forEach((entry, i) => {
       setTimeout(() => {
