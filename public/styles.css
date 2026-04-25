@@ -381,17 +381,12 @@ body {
 .member-stat-card {
   background: rgba(255, 255, 255, 0.78);
   border-radius: 12px;
-  border-top: 2px solid var(--chocolate);
-  border-right: 2px solid var(--chocolate);
-  border-bottom: 2px solid var(--chocolate);
-  border-left: 7px solid var(--peanut-butter);
+  border: 2px solid var(--chocolate);
   position: relative;
   overflow: hidden;
   transition: all 0.25s ease;
 }
-.member-stat-card.rank-1 { border-left-color: #e6b800; }
-.member-stat-card.rank-2 { border-left-color: #a8a8a8; }
-.member-stat-card.rank-3 { border-left-color: #b06020; }
+
 .member-stat-card:hover {
   transform: translateY(-3px);
   box-shadow: 0 10px 28px rgba(0,0,0,0.18);
@@ -442,6 +437,7 @@ body {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex-wrap: wrap;
 }
 .member-stat-name {
   font-size: 15px;
@@ -454,18 +450,30 @@ body {
   min-width: 0;
   line-height: 1.2;
 }
-.member-stat-rank {
-  font-size: 11px;
-  font-weight: 900;
-  padding: 2px 7px;
-  border-radius: 20px;
+.member-stat-role-icon {
+  width: 15px;
+  height: 15px;
   flex-shrink: 0;
-  border: 2px solid currentColor;
-  line-height: 1.4;
+  stroke-width: 2.2px;
 }
-.member-stat-rank.rank-1 { color: #c8a000; }
-.member-stat-rank.rank-2 { color: #888; }
-.member-stat-rank.rank-3 { color: #9a5418; }
+.member-stat-role-icon.role-founder        { color: var(--role-founder); }
+.member-stat-role-icon.role-acting-founder { color: var(--role-acting-founder); }
+.member-stat-role-icon.role-admin          { color: var(--role-admin); }
+.member-stat-role-icon.role-member         { color: var(--role-member); }
+.member-stat-role-icon.role-beginner       { color: var(--role-beginner); }
+.member-stat-rank {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  font-size: 12px;
+  font-weight: 900;
+  color: var(--chocolate);
+  opacity: 0.45;
+  line-height: 1;
+}
+.member-stat-rank.rank-1 { color: #c8a000; opacity: 1; }
+.member-stat-rank.rank-2 { color: #888; opacity: 1; }
+.member-stat-rank.rank-3 { color: #9a5418; opacity: 1; }
 
 /* Stats box */
 .member-stat-stats {
@@ -497,7 +505,7 @@ body {
   line-height: 1;
 }
 .member-stat-playtime {
-  font-size: 15px;
+  font-size: 22px;
   font-weight: 900;
   color: var(--chocolate-chip);
   line-height: 1;

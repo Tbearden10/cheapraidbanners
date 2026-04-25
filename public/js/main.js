@@ -32,6 +32,16 @@ function formatPlaytime(seconds) {
   return `${s}s`;
 }
 
+const ROLE_MAP = {
+  5: { icon: 'crown',  cls: 'role-founder' },
+  3: { icon: 'shield', cls: 'role-admin' },
+};
+function roleTag(memberType) {
+  const role = ROLE_MAP[memberType];
+  if (!role) return '';
+  return `<i data-lucide="${role.icon}" class="member-stat-role-icon ${role.cls}"></i>`;
+}
+
 // stats
 async function loadStats() {
   try {
@@ -71,6 +81,7 @@ function renderMembers(members) {
     const rankBadge = idx < 3 ? `<div class="member-stat-rank ${rankClass}">#${idx + 1}</div>` : '';
     return `
       <div class="member-stat-card ${rankClass} fade-in" data-clears="${clears}" data-playtime="${m.totalPlaytimeSeconds ?? 0}">
+        ${idx < 3 ? `<div class="member-stat-rank ${rankClass}">#${idx + 1}</div>` : ''}
         <div class="member-stat-inner">
           <div class="member-stat-emblem">
             ${emblem ? `<img src="${emblem}" alt="${name} emblem" />` : `<div class="member-stat-emblem-fallback"></div>`}
@@ -78,7 +89,7 @@ function renderMembers(members) {
           <div class="member-stat-right">
             <div class="member-stat-header">
               <div class="member-stat-name" title="${name}">${name}</div>
-              ${idx < 3 ? `<div class="member-stat-rank ${rankClass}">#${idx + 1}</div>` : ''}
+              ${roleTag(m.memberType)}
             </div>
             <div class="member-stat-stats">
               <div class="member-stat-stat">
@@ -88,7 +99,7 @@ function renderMembers(members) {
               <div class="member-stat-stat-divider"></div>
               <div class="member-stat-stat">
                 <div class="member-stat-playtime">—</div>
-                <div class="member-stat-stat-label">⏱ TIME</div>
+                <div class="member-stat-stat-label">TIME</div>
               </div>
             </div>
           </div>
@@ -100,22 +111,22 @@ function renderMembers(members) {
   // Lazy fade-in and animate clears
   const cards = container.querySelectorAll('.member-stat-card');
   const observer = new IntersectionObserver((entries, obs) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
+    const intersecting = entries
+      .filter(e => e.isIntersecting)
+      .sort((a, b) => a.boundingClientRect.left - b.boundingClientRect.left);
+
+    intersecting.forEach((entry, i) => {
+      setTimeout(() => {
         const card = entry.target;
         card.classList.add('visible');
         const clears = Number(card.getAttribute('data-clears')) || 0;
         const clearsEl = card.querySelector('.member-stat-clears');
-        if (clearsEl) {
-          window.animateCounter(clearsEl, clears, 1600);
-        }
+        if (clearsEl) window.animateCounter(clearsEl, clears, 1600);
         const playtime = Number(card.getAttribute('data-playtime')) || 0;
         const playtimeEl = card.querySelector('.member-stat-playtime');
-        if (playtimeEl) {
-          playtimeEl.textContent = formatPlaytime(playtime);
-        }
+        if (playtimeEl) playtimeEl.textContent = formatPlaytime(playtime);
         obs.unobserve(card);
-      }
+      }, i * 80);
     });
   }, { threshold: 0.2 });
   cards.forEach(card => observer.observe(card));
@@ -196,6 +207,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   mergedMembers.sort((a, b) => (b.totalFullClears ?? 0) - (a.totalFullClears ?? 0));
 
   renderMembers(mergedMembers);
+  if (window.lucide) lucide.createIcons();
   loadRecentActivities();
   document.querySelectorAll('.scroll-reveal').forEach(el => {
     const d = Number(el.getAttribute('data-delay')) || 0;
