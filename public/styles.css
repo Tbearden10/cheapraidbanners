@@ -488,17 +488,14 @@ body {
   align-self: stretch;
   background: rgba(92, 64, 51, 0.2);
 }
-.member-stat-clears {
-  font-size: 22px;
-  font-weight: 900;
-  color: var(--chocolate-chip);
-  line-height: 1;
-}
+.member-stat-clears,
 .member-stat-playtime {
   font-size: 22px;
   font-weight: 900;
   color: var(--chocolate-chip);
   line-height: 1;
+  text-align: center;       /* centers each wrapped line */
+  word-break: break-word;   /* allows clean wrapping if needed */
 }
 .member-stat-stat-label {
   font-size: 9px;
