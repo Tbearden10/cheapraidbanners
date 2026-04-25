@@ -88,7 +88,7 @@ function renderMembers(members) {
               <div class="member-stat-stat-divider"></div>
               <div class="member-stat-stat">
                 <div class="member-stat-playtime">—</div>
-                <div class="member-stat-stat-label">TIME</div>
+                <div class="member-stat-stat-label">PLAYTIME</div>
               </div>
             </div>
           </div>
@@ -139,7 +139,6 @@ async function loadRecentActivities() {
     container.innerHTML = activities.map(act => {
       const duration = formatPlaytime(act.duration);
       const badgeClass = act.completed ? 'clear-success' : 'clear-fail';
-      const badgeText = act.completed ? '✓' : '✗';
       const imageUrl = act.image || '';
       const styleAttr = imageUrl
         ? `background-image: url('${imageUrl}');`
@@ -148,7 +147,7 @@ async function loadRecentActivities() {
         <div class="gallery-item" style="${styleAttr}">
           <div class="gallery-item-overlay always-visible">
             <div class="gallery-item-time">${duration}</div>
-            <div class="gallery-item-badge ${badgeClass}">${badgeText}</div>
+            <div class="gallery-item-badge ${badgeClass}"></div>
           </div>
         </div>
       `;
