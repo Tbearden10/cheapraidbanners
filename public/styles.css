@@ -385,6 +385,7 @@ body {
   position: relative;
   overflow: hidden;
   transition: all 0.25s ease;
+  container-type: inline-size;
 }
 
 .member-stat-card:hover {
@@ -487,7 +488,7 @@ body {
 
 .member-stat-clears,
 .member-stat-playtime {
-  font-size: clamp(14px, 5.5vw, 24px);
+  font-size: clamp(13px, 6cqw, 22px);
   font-weight: 900;
   color: var(--chocolate-chip);
   line-height: 1;
